@@ -1592,3 +1592,133 @@ def test_buildconfig_sends_every_system_field():
     for field in ("selftest_enabled", "selftest_hour", "selftest_interval_min",
                   "ntp_server", "timezone", "dry_run"):
         assert field in body.group(1), f"buildConfig() does not send {field}"
+
+
+# --- SNMPv3 privacy ciphers -------------------------------------------------
+def test_snmpv3_privacy_ciphers_are_available():
+    """pysnmp 7.x ships no ciphers of its own — it needs the `cryptography` package.
+
+    Without it every authPriv poll fails with "Ciphering services not available" while
+    authNoPriv keeps working, which is exactly what a user reported. The flags below are
+    what pysnmp sets when its import of `cryptography` failed.
+    """
+    # Import through the public entry point first: pulling a priv module in on its own
+    # trips a circular import inside pysnmp.
+    import pysnmp.hlapi.asyncio  # noqa: F401
+    from pysnmp.proto.secmod.rfc3414.priv import des
+    from pysnmp.proto.secmod.rfc3826.priv import aes
+
+    assert des.PysnmpCryptoError is False, "SNMPv3 DES privacy unavailable"
+    # AES-192/256 inherit encrypt_data from this module, so one check covers all three.
+    assert aes.PysnmpCryptoError is False, "SNMPv3 AES privacy unavailable"
+
+
+def test_cryptography_still_exposes_the_apis_pysnmp_uses():
+    """Guard the two symbols pysnmp reaches for — the import flags above would not notice.
+
+    A missing package trips PysnmpCryptoError, but an API that merely *moved* still
+    imports and only blows up while encrypting, i.e. on the user's box. cryptography 49
+    already deprecates primitives.ciphers.modes.CFB (used by pysnmp's AES) and announces
+    its removal; this test fails the day it happens instead of the privacy silently
+    breaking again. See the version cap in pyproject.toml.
+    """
+    from cryptography.hazmat.decrepit.ciphers import algorithms as decrepit_algorithms
+    from cryptography.hazmat.primitives.ciphers import modes
+
+    assert hasattr(modes, "CFB"), "pysnmp AES needs primitives.ciphers.modes.CFB"
+    assert hasattr(
+        decrepit_algorithms, "TripleDES"
+    ), "pysnmp DES needs decrepit.ciphers.algorithms.TripleDES"
+
+
+def test_cryptography_is_a_declared_dependency():
+    """Guard the declaration itself: the venv may have it, a fresh install must too."""
+    from pathlib import Path
+
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    # Cut at the closing bracket on its own line — extras like uvicorn[standard] contain
+    # brackets, so splitting on a bare "]" would truncate the list.
+    block = pyproject.split("dependencies = [", 1)[1].split("\n]", 1)[0]
+    assert "cryptography" in block, "cryptography missing from [project].dependencies"
+
+
+def test_privacy_unavailable_only_applies_to_v3_with_privacy(monkeypatch):
+    import builtins
+
+    from app import ups
+
+    real_import = builtins.__import__
+
+    def no_crypto(name, *args, **kwargs):
+        if name.startswith("cryptography"):
+            raise ImportError("simulated: cryptography not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_crypto)
+
+    from app.config import SnmpAuthProto, SnmpPrivProto
+
+    def cfg(**kw):
+        base = dict(host="10.0.0.5", version=SnmpVersion.v3, v3_user="mon",
+                    v3_auth_proto=SnmpAuthProto.md5, v3_auth_pass="a")
+        base.update(kw)
+        return SnmpConfig(**base)
+
+    # v1/v2c never encrypt.
+    assert ups._privacy_unavailable(SnmpConfig(host="10.0.0.5", version=SnmpVersion.v2c)) is False
+    # v3 authNoPriv works without ciphers — the workaround we point users at.
+    assert ups._privacy_unavailable(cfg(v3_priv_proto=SnmpPrivProto.none)) is False
+    # v3 authPriv cannot work.
+    for proto in (SnmpPrivProto.des, SnmpPrivProto.aes, SnmpPrivProto.aes256):
+        assert ups._privacy_unavailable(cfg(v3_priv_proto=proto)) is True, proto
+
+
+def test_privacy_unavailable_is_false_when_ciphers_are_installed():
+    from app import ups
+    from app.config import SnmpAuthProto, SnmpPrivProto
+
+    cfg = SnmpConfig(host="10.0.0.5", version=SnmpVersion.v3, v3_user="mon",
+                     v3_auth_proto=SnmpAuthProto.md5, v3_auth_pass="a",
+                     v3_priv_proto=SnmpPrivProto.des, v3_priv_pass="p")
+    assert ups._privacy_unavailable(cfg) is False
+
+
+@pytest.mark.asyncio
+async def test_poll_reports_missing_ciphers_instead_of_unreachable(monkeypatch):
+    """The failure is local — nothing is sent — so it must not read like a network fault."""
+    from app import ups
+    from app.config import SnmpAuthProto, SnmpPrivProto
+
+    monkeypatch.setattr(ups, "_privacy_unavailable", lambda cfg: True)
+    sent: list = []
+    monkeypatch.setattr(ups, "_auth_data", lambda cfg: sent.append(cfg))
+
+    cfg = SnmpConfig(host="10.0.0.5", version=SnmpVersion.v3, v3_user="mon",
+                     v3_auth_proto=SnmpAuthProto.md5, v3_auth_pass="a",
+                     v3_priv_proto=SnmpPrivProto.des, v3_priv_pass="p")
+    state = await ups.poll(cfg)
+
+    assert state.reachable is False  # fail-safe unchanged: alarm, never a shutdown
+    assert state.error == ups.PRIVACY_MISSING
+    assert "cryptography" in state.error and "authNoPriv" in state.error
+    assert sent == []  # bailed out before building the request
+
+
+@pytest.mark.asyncio
+async def test_probe_reports_missing_ciphers_without_firewall_advice(monkeypatch):
+    from app import ups
+    from app.config import SnmpAuthProto, SnmpPrivProto
+
+    monkeypatch.setattr(ups, "_privacy_unavailable", lambda cfg: True)
+
+    cfg = SnmpConfig(host="10.0.0.5", version=SnmpVersion.v3, v3_user="mon",
+                     v3_auth_proto=SnmpAuthProto.md5, v3_auth_pass="a",
+                     v3_priv_proto=SnmpPrivProto.des, v3_priv_pass="p")
+    result = await ups.probe(cfg)
+
+    assert result.reachable is False
+    assert result.summary == ups.PRIVACY_MISSING
+    assert "firewall" not in result.summary.lower()
+    assert [e.status for e in result.entries] == ["skipped"] * result.total

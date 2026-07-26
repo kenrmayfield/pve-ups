@@ -176,6 +176,36 @@ def _priv_protocol(proto: SnmpPrivProto):
     }[proto]
 
 
+# Shown instead of pysnmp's "Ciphering services not available", which reads like a network
+# problem although not a single packet leaves the box.
+PRIVACY_MISSING = (
+    "SNMPv3 privacy (encryption) is not available in this installation: the Python package "
+    "'cryptography' is missing, and pysnmp delegates DES/AES to it. Update the appliance — "
+    "the package is installed automatically — or set this UPS user to authNoPriv "
+    "(privacy 'none') in the meantime. Authentication itself is unaffected."
+)
+
+
+def _privacy_unavailable(cfg: SnmpConfig) -> bool:
+    """True when this UPS needs SNMPv3 privacy but the ciphers are not installed.
+
+    Checked up front rather than by matching pysnmp's error text: the failure is purely
+    local (nothing is sent), and the generic "unreachable" wording sends users hunting for
+    firewalls. Never raises.
+    """
+    if cfg.version != SnmpVersion.v3 or cfg.v3_priv_proto == SnmpPrivProto.none:
+        return False
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher  # noqa: F401
+
+        if cfg.v3_priv_proto == SnmpPrivProto.des:
+            # DES lives in the "decrepit" module, which only exists from cryptography 43.
+            from cryptography.hazmat.decrepit.ciphers import algorithms  # noqa: F401
+    except Exception:  # noqa: BLE001 - any import trouble means "cannot encrypt"
+        return True
+    return False
+
+
 def _auth_data(cfg: SnmpConfig):
     from pysnmp.hlapi.asyncio import CommunityData, UsmUserData
 
@@ -273,6 +303,11 @@ async def poll(cfg: SnmpConfig) -> UpsState:
 
     if not cfg.configured:
         state.error = "SNMP not configured"
+        return state
+    if _privacy_unavailable(cfg):
+        # Fail fast with the real reason; reachable stays False, so the fail-safe
+        # behaviour (alarm, never a shutdown) is unchanged.
+        state.error = PRIVACY_MISSING
         return state
 
     engine = None
@@ -417,6 +452,12 @@ async def probe(cfg: SnmpConfig) -> ProbeResult:
     if not cfg.configured:
         result.entries = [_skipped(oid) for oid in _ALL_OIDS]
         result.summary = "SNMP not configured (no host set)."
+        return result
+    if _privacy_unavailable(cfg):
+        # Nothing can be sent, so per-OID results would be seven identical local errors
+        # and the usual "check the firewall" advice would be actively misleading.
+        result.entries = [_skipped(oid) for oid in _ALL_OIDS]
+        result.summary = PRIVACY_MISSING
         return result
 
     engine = None

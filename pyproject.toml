@@ -23,6 +23,14 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "httpx>=0.27",
     "pysnmp>=6.2",            # lextudio fork, async SNMP v1/v2c/v3
+    # pysnmp 7.x ships no ciphers of its own and delegates SNMPv3 privacy (DES/3DES/AES)
+    # to this package; without it every authPriv poll fails with "Ciphering services not
+    # available". It declares the dependency only in its dev extra, so we must pull it in.
+    # Floor 43: DES/3DES import cryptography.hazmat.decrepit, which starts there. Capped
+    # below 50 on purpose: pysnmp's AES still uses primitives.ciphers.modes.CFB, which
+    # cryptography 49 deprecates and announces for removal — an uncapped upgrade would
+    # silently break SNMPv3 privacy again. Lift the cap once pysnmp moved to decrepit.
+    "cryptography>=43,<50",
     "pydantic>=2.6",
     "pyyaml>=6.0",
     "passlib[argon2]>=1.7",  # UI password hashing
