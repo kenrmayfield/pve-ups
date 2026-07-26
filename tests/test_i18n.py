@@ -80,3 +80,21 @@ def test_snmp_probe_status_keys_exist_in_both_dictionaries():
         if f"snmp.st.{status}" not in en or f"snmp.st.{status}" not in de
     ]
     assert not missing, f"probe statuses without a dictionary entry: {missing}"
+
+
+def test_selftest_interval_options_match_the_backend():
+    """The <select> in index.html must offer exactly config.SELFTEST_INTERVALS.
+
+    HTML and Python constant are the one place where the selectable intervals can drift
+    apart; a value the backend does not accept would be snapped back to 1440 on save.
+    """
+    from app.config import SELFTEST_INTERVALS
+
+    block = re.search(
+        r'<select id="selftest_interval_min">(.*?)</select>',
+        (WEB / "index.html").read_text(encoding="utf-8"),
+        re.DOTALL,
+    )
+    assert block, "selftest_interval_min <select> not found in index.html"
+    values = [int(v) for v in re.findall(r'value="(\d+)"', block.group(1))]
+    assert values == list(SELFTEST_INTERVALS)

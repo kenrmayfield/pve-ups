@@ -18,10 +18,15 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import yaml
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
 # Location can be overridden for tests / local runs.
 CONFIG_PATH = Path(os.environ.get("PVE_USV_CONFIG", "/etc/pve-usv/config.yaml"))
+
+# Selectable self-test intervals in minutes. Every one of them divides 1440 evenly, so the
+# schedule forms an exact daily grid anchored at ``selftest_hour`` (see engine.selftest_slot).
+# The <select> in app/web/index.html must offer exactly these values.
+SELFTEST_INTERVALS = (15, 30, 60, 120, 180, 360, 720, 1440)
 
 
 class SnmpVersion(str, Enum):
@@ -177,10 +182,11 @@ class AppConfig(BaseModel):
     thresholds: Thresholds = Thresholds()
     notifications: Notifications = Notifications()
 
-    # Daily self-test: verify the Proxmox API token + Sys.PowerMgmt still work, so a
+    # Scheduled self-test: verify the Proxmox API token + Sys.PowerMgmt still work, so a
     # broken/expired credential is caught long before a real outage needs it.
     selftest_enabled: bool = True
-    selftest_hour: int = 9  # hour of day (0-23, server local time) to run the test
+    selftest_hour: int = 9  # anchor: hour of day (0-23, server local time)
+    selftest_interval_min: int = 1440  # repeat every N minutes from the anchor; 1440 = daily
 
     # Optional NTP server pushed to the container's systemd-timesyncd (empty = leave
     # the system default untouched). Applied by the privileged deploy agent.
@@ -188,7 +194,7 @@ class AppConfig(BaseModel):
 
     # Optional IANA timezone (e.g. "Europe/Berlin") applied to the container by the
     # privileged deploy agent (empty = leave the system default, usually UTC, untouched).
-    # Matters because selftest_hour is interpreted in the container's local time.
+    # Matters because the self-test schedule is interpreted in the container's local time.
     timezone: str = ""
 
     # Web UI auth. Read-only endpoints (/api/status, /api/health) are NOT protected.
@@ -219,6 +225,29 @@ class AppConfig(BaseModel):
                     if isinstance(host, dict) and not host.get("ups_ids"):
                         host["ups_ids"] = ["ups1"]
         return data
+
+    @field_validator("selftest_interval_min", mode="before")
+    @classmethod
+    def _normalise_selftest_interval(cls, value):
+        """Snap an unsupported interval to the daily default instead of rejecting it.
+
+        A backup from another version or a hand-edited YAML must still import: a
+        self-test running on the wrong cadence is cosmetic, a refused import is not.
+        """
+        try:
+            minutes = int(value)
+        except (TypeError, ValueError):
+            return 1440
+        return minutes if minutes in SELFTEST_INTERVALS else 1440
+
+    @field_validator("selftest_hour", mode="before")
+    @classmethod
+    def _clamp_selftest_hour(cls, value):
+        """Clamp to 0-23 — an out-of-range hour must not break the import either."""
+        try:
+            return min(23, max(0, int(value)))
+        except (TypeError, ValueError):
+            return 9
 
     def effective_thresholds(self, ups: SnmpConfig) -> Thresholds:
         """Global thresholds with this UPS's non-None overrides applied."""

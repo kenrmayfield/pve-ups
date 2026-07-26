@@ -244,11 +244,22 @@
         </div>
         <p class="help" id="sysDockerNote" hidden data-i18n="sys.dockerNote">Time and timezone are controlled by the Docker host / orchestrator, not by this container.</p>
         <label class="switch"
-          title="Checks once a day per host whether the API token still works." data-i18n-title="sys.selftestTitle">
+          title="Checks per host on a schedule whether the API token still works." data-i18n-title="sys.selftestTitle">
           <input type="checkbox" id="selftest_enabled" />
-          <span data-i18n="sys.selftest">Daily self-test of the Proxmox connection</span></label>
+          <span data-i18n="sys.selftest">Automatic self-test of the Proxmox connection</span></label>
         <div class="row">
-          <label title="Time of day (full hour, 0–23) at which the self-test runs." data-i18n-title="sys.selftestHourTitle"><span data-i18n="sys.selftestHour">Self-test time (hour 0–23)</span> <input id="selftest_hour" type="number" min="0" max="23" /></label>
+          <label title="Anchor of the schedule: full hour (0–23) at which the self-test starts." data-i18n-title="sys.selftestHourTitle"><span data-i18n="sys.selftestHour">Self-test start time (hour 0–23)</span> <input id="selftest_hour" type="number" min="0" max="23" /></label>
+          <label title="How often the self-test repeats, anchored at the start time." data-i18n-title="sys.selftestIntervalTitle"><span data-i18n="sys.selftestInterval">Interval</span>
+            <select id="selftest_interval_min">
+              <option value="15" data-i18n="sys.iv15">every 15 min</option>
+              <option value="30" data-i18n="sys.iv30">every 30 min</option>
+              <option value="60" data-i18n="sys.iv60">hourly</option>
+              <option value="120" data-i18n="sys.iv120">every 2 h</option>
+              <option value="180" data-i18n="sys.iv180">every 3 h</option>
+              <option value="360" data-i18n="sys.iv360">every 6 h</option>
+              <option value="720" data-i18n="sys.iv720">every 12 h</option>
+              <option value="1440" data-i18n="sys.iv1440">daily (24 h)</option>
+            </select></label>
         </div>
       </div>
 

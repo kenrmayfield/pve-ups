@@ -1113,3 +1113,482 @@ async def test_api_test_snmp_returns_probe_details_without_secrets(monkeypatch):
     assert body["probe"]["entries"][0]["name"] == "upsOutputSource"
     assert body["probe"]["ok_count"] == 1
     assert "s3cr3t" not in json.dumps(body)
+
+
+# --- self-test schedule (v3.1.0) -------------------------------------------
+def test_selftest_slot_is_anchored_at_the_start_hour():
+    from app.engine import selftest_slot
+
+    # 09:00 + every 6 h -> 09:00, 15:00, 21:00, 03:00
+    assert selftest_slot(datetime(2026, 7, 25, 15, 7), 9, 360) == datetime(2026, 7, 25, 15, 0)
+    assert selftest_slot(datetime(2026, 7, 25, 9, 0), 9, 360) == datetime(2026, 7, 25, 9, 0)
+
+
+def test_selftest_slot_wraps_across_midnight():
+    from app.engine import selftest_slot
+
+    # 03:00 belongs to today's grid, not to tomorrow's.
+    assert selftest_slot(datetime(2026, 7, 25, 3, 30), 9, 360) == datetime(2026, 7, 25, 3, 0)
+    # Anchor 23:00, every 2 h: 00:30 falls into yesterday's 23:00 slot.
+    assert selftest_slot(datetime(2026, 7, 25, 0, 30), 23, 120) == datetime(2026, 7, 24, 23, 0)
+
+
+def test_selftest_slot_daily_default_matches_the_old_behaviour():
+    from app.engine import selftest_slot
+
+    assert selftest_slot(datetime(2026, 7, 25, 8, 59), 9, 1440) == datetime(2026, 7, 24, 9, 0)
+    assert selftest_slot(datetime(2026, 7, 25, 9, 0), 9, 1440) == datetime(2026, 7, 25, 9, 0)
+    assert selftest_slot(datetime(2026, 7, 25, 23, 59), 9, 1440) == datetime(2026, 7, 25, 9, 0)
+
+
+def test_selftest_slot_grid_is_exact_for_every_supported_interval():
+    from app.config import SELFTEST_INTERVALS
+    from app.engine import selftest_slot
+
+    for interval in SELFTEST_INTERVALS:
+        day = datetime(2026, 7, 25)
+        slots = [selftest_slot(day + timedelta(minutes=m), 9, interval) for m in range(0, 1440, 5)]
+        # Compare times of day: a day's worth of samples spans one grid period more than
+        # the grid itself (the 00:00 sample belongs to yesterday's last slot).
+        assert len({(s.hour, s.minute) for s in slots}) == 1440 // interval, interval
+        assert slots == sorted(slots), interval  # monotonically non-decreasing
+        for slot in slots:
+            assert (slot.hour * 60 + slot.minute - 9 * 60) % interval == 0, (interval, slot)
+
+
+def test_selftest_slot_tolerates_broken_values():
+    from app.engine import selftest_slot
+
+    assert selftest_slot(datetime(2026, 7, 25, 10, 0), 99, 0) is not None
+    assert selftest_slot(datetime(2026, 7, 25, 10, 0), 9, None) is not None
+    assert selftest_slot(datetime(2026, 7, 25, 10, 0), -5, -60) is not None
+
+
+def _selftest_engine(monkeypatch, now, **cfg_kwargs):
+    """Engine with one host, a patched local clock and a counting _run_selftest."""
+    from app import engine as engine_mod
+
+    cfg = AppConfig(
+        hosts=[HostConfig(name="pve01", api_url="https://10.0.0.10:8006")], **cfg_kwargs
+    )
+    clock = {"now": now}
+    monkeypatch.setattr(engine_mod, "_local_now", lambda: clock["now"])
+    eng = Engine(cfg)
+    runs: list = []
+
+    async def fake_run():
+        runs.append(clock["now"])
+
+    eng._run_selftest = fake_run  # type: ignore[method-assign]
+    return eng, clock, runs
+
+
+@pytest.mark.asyncio
+async def test_selftest_runs_once_per_slot(monkeypatch):
+    eng, clock, runs = _selftest_engine(
+        monkeypatch, datetime(2026, 7, 25, 10, 0), selftest_hour=9, selftest_interval_min=15
+    )
+
+    await eng._maybe_selftest()
+    await eng._maybe_selftest()  # same slot -> no second run
+    assert len(runs) == 1
+
+    clock["now"] = datetime(2026, 7, 25, 10, 14)
+    await eng._maybe_selftest()
+    assert len(runs) == 1
+
+    clock["now"] = datetime(2026, 7, 25, 10, 15)
+    await eng._maybe_selftest()
+    assert len(runs) == 2
+
+
+@pytest.mark.asyncio
+async def test_selftest_daily_default_runs_once_a_day(monkeypatch):
+    eng, clock, runs = _selftest_engine(
+        monkeypatch, datetime(2026, 7, 25, 9, 30), selftest_hour=9, selftest_interval_min=1440
+    )
+
+    await eng._maybe_selftest()
+    clock["now"] = datetime(2026, 7, 25, 20, 0)
+    await eng._maybe_selftest()
+    assert len(runs) == 1
+
+    clock["now"] = datetime(2026, 7, 26, 9, 30)
+    await eng._maybe_selftest()
+    assert len(runs) == 2
+
+
+@pytest.mark.asyncio
+async def test_selftest_is_skipped_while_on_battery(monkeypatch):
+    eng, clock, runs = _selftest_engine(
+        monkeypatch,
+        datetime(2026, 7, 25, 10, 0),
+        selftest_hour=9,
+        selftest_interval_min=15,
+        ups=[SnmpConfig(id="u1", host="10.0.0.5")],
+    )
+    eng.ups_rt["u1"].on_battery_since = datetime(2026, 7, 25, 9, 55, tzinfo=timezone.utc)
+
+    await eng._maybe_selftest()
+    assert runs == []
+    # No latch was taken, so the test runs as soon as mains are back.
+    assert eng.last_selftest_slot is None
+    eng.ups_rt["u1"].on_battery_since = None
+    await eng._maybe_selftest()
+    assert len(runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_selftest_never_runs_when_disabled_or_without_hosts(monkeypatch):
+    from app import engine as engine_mod
+
+    monkeypatch.setattr(engine_mod, "_local_now", lambda: datetime(2026, 7, 25, 10, 0))
+
+    configs = [
+        AppConfig(
+            hosts=[HostConfig(name="pve01", api_url="https://x:8006")], selftest_enabled=False
+        ),
+        AppConfig(selftest_enabled=True),  # no hosts
+    ]
+    for cfg in configs:
+        eng = Engine(cfg)
+        runs: list = []
+
+        async def fake_run():
+            runs.append(1)
+
+        eng._run_selftest = fake_run  # type: ignore[method-assign]
+        await eng._maybe_selftest()
+        assert runs == []
+
+
+@pytest.mark.asyncio
+async def test_selftest_slot_survives_a_restart(monkeypatch):
+    """Without persistence a 15-minute cadence would re-test on every service restart."""
+    import json as _json
+
+    from app import engine as engine_mod
+
+    eng, clock, runs = _selftest_engine(
+        monkeypatch, datetime(2026, 7, 25, 10, 0), selftest_hour=9, selftest_interval_min=15
+    )
+    await eng._maybe_selftest()
+    assert len(runs) == 1
+
+    written = _json.loads(engine_mod.STATE_PATH.read_text(encoding="utf-8"))
+    assert written["selftest_slot"] == "2026-07-25T10:00:00"
+
+    # Fresh engine, same wall clock -> latch restored, no repeat run.
+    restarted = Engine(eng.cfg)
+    restarted_runs: list = []
+
+    async def fake_run():
+        restarted_runs.append(1)
+
+    restarted._run_selftest = fake_run  # type: ignore[method-assign]
+    assert restarted.last_selftest_slot == datetime(2026, 7, 25, 10, 0)
+    await restarted._maybe_selftest()
+    assert restarted_runs == []
+
+
+@pytest.mark.asyncio
+async def test_selftest_outcome_survives_a_restart(monkeypatch):
+    """Since a restart no longer re-runs the test, /api/status must keep the last result."""
+    from app import engine as engine_mod
+    from app.proxmox import TestResult
+
+    monkeypatch.setattr(engine_mod, "_local_now", lambda: datetime(2026, 7, 25, 10, 0))
+    cfg = AppConfig(hosts=[HostConfig(name="pve01", api_url="https://10.0.0.10:8006")])
+    eng = Engine(cfg)
+
+    async def fake_test(host, *a, **k):
+        return TestResult(True, "ok", has_power_mgmt=True)
+
+    monkeypatch.setattr(engine_mod.proxmox, "test_connection", fake_test)
+    monkeypatch.setattr(eng, "_log_quiet", lambda *a: None)
+    await eng._maybe_selftest()
+    eng._persist_state()  # the loop persists again on its next _evaluate
+
+    restarted = Engine(cfg)
+    assert restarted.last_selftest_ok is True
+    assert restarted.last_selftest_at == eng.last_selftest_at
+    assert restarted.snapshot()["appliance"]["last_selftest_at"] is not None
+
+
+def test_state_file_from_an_older_version_still_loads():
+    """A state file written before the self-test slot existed must not break startup."""
+    import json as _json
+
+    from app import engine as engine_mod
+
+    since = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    engine_mod.STATE_PATH.write_text(
+        _json.dumps({"on_battery_since": {"u1": since}}), encoding="utf-8"
+    )
+    eng = Engine(AppConfig(ups=[SnmpConfig(id="u1", host="10.0.0.5")]))
+
+    assert eng.last_selftest_slot is None
+    assert eng.ups_rt["u1"].on_battery_since is not None
+
+
+def test_selftest_slot_in_the_future_is_discarded(monkeypatch):
+    """A backwards clock jump must not block self-tests until the clock catches up."""
+    import json as _json
+
+    from app import engine as engine_mod
+
+    monkeypatch.setattr(engine_mod, "_local_now", lambda: datetime(2026, 7, 25, 10, 0))
+    engine_mod.STATE_PATH.write_text(
+        _json.dumps({"selftest_slot": "2026-07-25T13:00:00"}), encoding="utf-8"
+    )
+    assert Engine(AppConfig()).last_selftest_slot is None
+
+
+@pytest.mark.asyncio
+async def test_run_selftest_queries_hosts_concurrently_and_damps_success_events(monkeypatch):
+    """Sequential checks would stall the loop; one 'ok' event per run would flood the log."""
+    import asyncio
+
+    from app import engine as engine_mod
+    from app.proxmox import TestResult
+
+    monkeypatch.setattr(engine_mod, "_local_now", lambda: datetime(2026, 7, 25, 10, 0))
+    cfg = AppConfig(
+        hosts=[
+            HostConfig(name="pve01", api_url="https://10.0.0.10:8006"),
+            HostConfig(name="pve02", api_url="https://10.0.0.11:8006"),
+        ]
+    )
+    eng = Engine(cfg)
+
+    in_flight = {"now": 0, "max": 0}
+
+    async def fake_test(host, *a, **k):
+        in_flight["now"] += 1
+        in_flight["max"] = max(in_flight["max"], in_flight["now"])
+        await asyncio.sleep(0.01)
+        in_flight["now"] -= 1
+        return TestResult(True, "ok", has_power_mgmt=True)
+
+    logged: list = []
+    monkeypatch.setattr(engine_mod.proxmox, "test_connection", fake_test)
+    monkeypatch.setattr(eng, "_log_quiet", lambda s, b, sev: logged.append(s))
+
+    await eng._run_selftest()
+    assert in_flight["max"] == 2  # both hosts were in flight at the same time
+    assert len(logged) == 2  # first run of the day: one quiet event per host
+    assert eng.last_selftest_ok is True
+
+    await eng._run_selftest()
+    assert len(logged) == 2  # same day, still ok -> no further event-log noise
+
+
+@pytest.mark.asyncio
+async def test_run_selftest_always_reports_failures(monkeypatch):
+    from app import engine as engine_mod
+    from app.proxmox import TestResult
+
+    monkeypatch.setattr(engine_mod, "_local_now", lambda: datetime(2026, 7, 25, 10, 0))
+    eng = Engine(AppConfig(hosts=[HostConfig(name="pve01", api_url="https://10.0.0.10:8006")]))
+
+    async def fake_test(host, *a, **k):
+        return TestResult(False, "Authentication failed (token invalid?)")
+
+    emitted: list = []
+
+    async def fake_emit(subject, body, severity):
+        emitted.append((subject, severity))
+
+    monkeypatch.setattr(engine_mod.proxmox, "test_connection", fake_test)
+    monkeypatch.setattr(eng, "_emit", fake_emit)
+
+    await eng._run_selftest()
+    await eng._run_selftest()  # failures are never damped
+
+    assert len(emitted) == 2
+    assert emitted[0][0] == "Self-test pve01: FAILED"
+    assert eng.last_selftest_ok is False
+
+
+def test_config_roundtrip_selftest_interval(tmp_path):
+    path = tmp_path / "c.yaml"
+    save_config(AppConfig(selftest_hour=3, selftest_interval_min=360), path)
+    assert load_config(path).selftest_interval_min == 360
+
+
+def test_selftest_fields_are_import_forgiving():
+    """A backup from another version must import, not 400."""
+    assert AppConfig.model_validate({"selftest_interval_min": 45}).selftest_interval_min == 1440
+    assert AppConfig.model_validate({"selftest_interval_min": None}).selftest_interval_min == 1440
+    assert AppConfig.model_validate({"selftest_interval_min": "360"}).selftest_interval_min == 360
+    assert AppConfig.model_validate({"selftest_hour": 99}).selftest_hour == 23
+    assert AppConfig.model_validate({"selftest_hour": -1}).selftest_hour == 0
+    assert AppConfig.model_validate({"selftest_hour": "abc"}).selftest_hour == 9
+    assert AppConfig().selftest_interval_min == 1440  # default = previous behaviour
+
+
+# --- config export / import round-trip -------------------------------------
+def _full_config() -> AppConfig:
+    """A config with every notable field populated, for round-trip coverage."""
+    from app.config import Notifications, WebhookConfig
+
+    return AppConfig(
+        configured=True,
+        dry_run=False,
+        ups=[
+            SnmpConfig(id="a", name="UPS A", host="10.0.0.1", community="comm-a"),
+            SnmpConfig(
+                id="b", name="UPS B", host="10.0.0.2", port=1161, version=SnmpVersion.v3,
+                v3_user="mon", v3_auth_pass="auth-b", v3_priv_pass="priv-b",
+                overrides=UpsThresholdOverride(runtime_below_minutes=2, on_battery_low=True),
+            ),
+        ],
+        hosts=[
+            HostConfig(name="pve01", api_url="https://10.0.0.10:8006",
+                       token_id="ups@pve!sd", token_secret="tok-1", ups_ids=["a"]),
+            HostConfig(name="pve02", api_url="https://10.0.0.11:8006",
+                       token_id="ups@pve!sd", token_secret="tok-2",
+                       ups_ids=["a", "b"], ups_policy="any", this_host=True),
+        ],
+        thresholds=Thresholds(runtime_below_minutes=7, comm_loss_shutdown_after_min=15),
+        notifications=Notifications(webhook=WebhookConfig(enabled=True, url="https://hook/x")),
+        selftest_enabled=True,
+        selftest_hour=3,
+        selftest_interval_min=360,
+        ntp_server="pool.ntp.org",
+        timezone="Europe/Berlin",
+    )
+
+
+def test_export_reveals_secrets_but_drops_auth_material():
+    import json
+
+    from app import main
+
+    data = main._exportable_config(_full_config())
+
+    assert data["ups"][0]["community"] == "comm-a"
+    assert data["ups"][1]["v3_auth_pass"] == "auth-b"
+    assert data["hosts"][0]["token_secret"] == "tok-1"
+    assert main.SECRET_PLACEHOLDER not in json.dumps(data)  # a backup must be restorable
+    assert "session_secret" not in data and "ui_password_hash" not in data
+
+
+def test_sanitized_config_masks_secrets_for_the_ui():
+    import json
+
+    from app import main
+
+    data = main._sanitized_config(_full_config())
+
+    assert data["ups"][0]["community"] == main.SECRET_PLACEHOLDER
+    assert "comm-a" not in json.dumps(data)
+    assert "tok-1" not in json.dumps(data)
+    assert "session_secret" not in data and "ui_password_hash" not in data
+
+
+@pytest.fixture
+def _import_target(monkeypatch, tmp_path):
+    """A running engine whose imports are captured instead of touching the system."""
+    from app import main
+
+    saved: list = []
+    running = AppConfig(ui_password_hash="hash-of-the-running-instance",
+                        session_secret="session-of-the-running-instance")
+    monkeypatch.setattr(main, "engine", Engine(running))
+    monkeypatch.setattr(main, "save_config", lambda cfg, *a, **k: saved.append(cfg))
+    monkeypatch.setattr(main, "IS_DOCKER", True)  # no privileged agent to enqueue jobs to
+    monkeypatch.setattr(main.db, "log_event", lambda *a, **k: None)
+    return main, saved
+
+
+@pytest.mark.asyncio
+async def test_export_import_round_trip_preserves_every_field(_import_target):
+    main, saved = _import_target
+    original = _full_config()
+
+    await main.api_config_import(main._exportable_config(original))
+    restored = main.engine.cfg
+
+    assert [u.id for u in restored.ups] == ["a", "b"]
+    assert restored.ups[0].community.get_secret_value() == "comm-a"
+    assert restored.ups[1].v3_auth_pass.get_secret_value() == "auth-b"
+    assert restored.ups[1].v3_priv_pass.get_secret_value() == "priv-b"
+    assert restored.ups[1].port == 1161
+    assert restored.ups[1].overrides.runtime_below_minutes == 2
+    assert restored.ups[1].overrides.on_battery_low is True
+    assert [h.name for h in restored.hosts] == ["pve01", "pve02"]
+    assert restored.hosts[1].token_secret.get_secret_value() == "tok-2"
+    assert restored.hosts[1].ups_policy == "any"
+    assert restored.hosts[1].this_host is True
+    assert restored.thresholds.runtime_below_minutes == 7
+    assert restored.thresholds.comm_loss_shutdown_after_min == 15
+    assert restored.notifications.webhook.url == "https://hook/x"
+    assert restored.dry_run is False
+    assert restored.ntp_server == "pool.ntp.org"
+    assert restored.timezone == "Europe/Berlin"
+    assert restored.selftest_hour == 3
+    assert restored.selftest_interval_min == 360
+
+    # The running instance keeps its own login and session signing key.
+    assert restored.ui_password_hash == "hash-of-the-running-instance"
+    assert restored.session_secret == "session-of-the-running-instance"
+    assert saved and saved[0].configured is True
+
+
+@pytest.mark.asyncio
+async def test_import_of_an_older_backup_survives_unknown_values(_import_target):
+    """A backup written by another version must import, not fail with 400."""
+    main, _ = _import_target
+
+    result = await main.api_config_import(
+        {"selftest_interval_min": 45, "selftest_hour": 42, "unknown_future_key": True}
+    )
+
+    assert result["selftest_interval_min"] == 1440  # snapped to the daily default
+    assert result["selftest_hour"] == 23
+
+
+@pytest.mark.asyncio
+async def test_import_of_a_pre_2x_backup_migrates_the_single_ups(_import_target):
+    main, _ = _import_target
+
+    await main.api_config_import({
+        "snmp": {"host": "10.0.0.9", "community": "sec", "version": "v2c"},
+        "hosts": [{"name": "pve01", "api_url": "https://x:8006"}],
+    })
+    restored = main.engine.cfg
+
+    assert [u.id for u in restored.ups] == ["ups1"]
+    assert restored.ups[0].community.get_secret_value() == "sec"
+    assert restored.hosts[0].ups_ids == ["ups1"]
+
+
+@pytest.mark.asyncio
+async def test_import_rejects_a_broken_payload(_import_target):
+    from fastapi import HTTPException
+
+    main, saved = _import_target
+
+    with pytest.raises(HTTPException) as excinfo:
+        await main.api_config_import({"ups": "not-a-list"})
+
+    assert excinfo.value.status_code == 400
+    assert saved == []  # nothing was written
+
+
+def test_buildconfig_sends_every_system_field():
+    """Guard against the silent-reset trap: the server rebuilds the config from this
+    payload alone, so a field the UI omits falls back to its default on every save."""
+    import re
+    from pathlib import Path
+
+    app_js = (Path(__file__).resolve().parents[1] / "app" / "web" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    body = re.search(r"function buildConfig\(\)\s*\{(.*?)\n\}", app_js, re.DOTALL)
+    assert body, "buildConfig() not found in app.js"
+
+    for field in ("selftest_enabled", "selftest_hour", "selftest_interval_min",
+                  "ntp_server", "timezone", "dry_run"):
+        assert field in body.group(1), f"buildConfig() does not send {field}"

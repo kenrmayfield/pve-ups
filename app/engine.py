@@ -24,7 +24,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from . import __version__, db, notify, proxmox
@@ -47,6 +47,36 @@ STATE_RESTORE_MAX_AGE_H = 24  # discard persisted timers older than this
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _local_now() -> datetime:
+    """Naive *local* wall clock, kept separate from _now().
+
+    The self-test schedule is a wall-clock time the user configures, so it has to follow
+    the container's timezone; durations and timestamps stay UTC (_now()). Also the single
+    seam the schedule tests patch.
+    """
+    return datetime.now()
+
+
+def selftest_slot(now_local: datetime, hour: int, interval_min: int) -> datetime:
+    """Start of the self-test slot ``now_local`` falls into (naive local time).
+
+    The grid is anchored at ``hour``:00 and repeats every ``interval_min`` minutes. Every
+    selectable interval divides 1440 evenly, so the grid is the same on every day and
+    wraps cleanly across midnight (anchor 23:00, every 2 h -> 23:00, 01:00, 03:00, ...).
+    Total by construction: a nonsensical hour or interval degrades to a daily grid rather
+    than raising, because this runs inside the poll loop.
+
+    DST is deliberately handled by doing nothing: in spring the slots inside the skipped
+    hour simply do not occur that day, in autumn the repeated hour yields the same slot
+    value twice and the caller's latch swallows the second run.
+    """
+    step = interval_min if interval_min and interval_min > 0 else 1440
+    anchor = (hour % 24) * 60
+    minute_of_day = now_local.hour * 60 + now_local.minute
+    elapsed = (minute_of_day - anchor) % step
+    return now_local.replace(second=0, microsecond=0) - timedelta(minutes=elapsed)
 
 
 @dataclass
@@ -74,6 +104,17 @@ class Engine:
         self.ups_rt: dict[str, _UpsRuntime] = {}
         self._sync_runtimes()
 
+        # Self-test scheduling, on two clocks on purpose:
+        #   last_selftest_slot: naive LOCAL grid position -> the schedule latch (persisted)
+        #   last_selftest_at:   UTC timestamp of the actual run -> REST API only
+        # Declared before _restore_state() below, which re-arms the slot from the state
+        # file — assigning them afterwards would wipe the restored value.
+        self.last_selftest_slot: Optional[datetime] = None
+        self.last_selftest_at: Optional[datetime] = None
+        self.last_selftest_ok: Optional[bool] = None
+        # Date (naive local) on which a successful run was last written to the event log.
+        self.last_selftest_ok_logged: Optional[date] = None
+
         # Re-arm battery timers + latched triggers from the state file (None = nothing
         # written yet, so the first _evaluate always persists and clears a stale file).
         self._persisted_state: Optional[dict] = None
@@ -91,11 +132,6 @@ class Engine:
 
         # Daily housekeeping: keep the event log bounded.
         self.last_prune_date = None  # type: ignore[var-annotated]
-
-        # Daily self-test of the Proxmox API credentials.
-        self.last_selftest_date = None  # type: ignore[var-annotated]
-        self.last_selftest_at: Optional[datetime] = None
-        self.last_selftest_ok: Optional[bool] = None
 
         self._task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
@@ -150,8 +186,39 @@ class Engine:
                     ),
                     db.WARNING,
                 )
+            self._restore_selftest_slot(data.get("selftest_slot"))
+            self._restore_selftest_outcome(data.get("selftest_at"), data.get("selftest_ok"))
         except Exception as exc:  # noqa: BLE001 - a broken state file must never block startup
             log.warning("Engine state restore failed: %s", exc)
+
+    def _restore_selftest_slot(self, raw) -> None:
+        """Re-arm the self-test latch, so a restart does not re-run the test immediately.
+
+        Written as a naive *local* timestamp (unlike the UTC values above). A value in the
+        future can only come from a backwards clock jump (NTP correction, timezone change)
+        and is dropped — keeping it would block self-tests until the clock caught up.
+        """
+        if not isinstance(raw, str):
+            return
+        try:
+            slot = datetime.fromisoformat(raw)
+        except ValueError:
+            return
+        if slot.tzinfo is None and slot <= _local_now() + timedelta(minutes=1):
+            self.last_selftest_slot = slot
+
+    def _restore_selftest_outcome(self, raw_at, raw_ok) -> None:
+        """Carry the last result over a restart, so /api/status keeps reporting it."""
+        if not isinstance(raw_at, str):
+            return
+        try:
+            when = datetime.fromisoformat(raw_at)
+        except ValueError:
+            return
+        if when.tzinfo is None:  # ours is UTC-aware; anything else is not our value
+            return
+        self.last_selftest_at = when
+        self.last_selftest_ok = raw_ok if isinstance(raw_ok, bool) else None
 
     def _persist_state(self) -> None:
         """Best-effort: write the per-UPS battery timers + latched triggers on change."""
@@ -169,6 +236,15 @@ class Engine:
                 if rt.triggered and rt.trigger_reason and rt.on_battery_since is not None
             },
         }
+        # Naive LOCAL timestamp, unlike everything above — the self-test grid is
+        # wall-clock based. Key absent = the test has not run yet on this instance.
+        if self.last_selftest_slot is not None:
+            current["selftest_slot"] = self.last_selftest_slot.isoformat()
+        # The outcome travels with the latch: since a restart no longer re-runs the test,
+        # /api/status would otherwise report "never tested" until the next slot.
+        if self.last_selftest_at is not None:
+            current["selftest_at"] = self.last_selftest_at.isoformat()
+            current["selftest_ok"] = self.last_selftest_ok
         if current == self._persisted_state:
             return
         try:
@@ -199,7 +275,11 @@ class Engine:
                 pass
 
     def update_config(self, cfg: AppConfig) -> None:
-        """Apply a new config (from the UI) without restarting the loop."""
+        """Apply a new config (from the UI) without restarting the loop.
+
+        The self-test latch is deliberately kept: saving settings must not fire a
+        credential check, and a changed schedule takes effect at its next slot.
+        """
         self.cfg = cfg
         self._sync_runtimes()
 
@@ -593,7 +673,7 @@ class Engine:
 
     def _maybe_prune(self) -> None:
         """Trim the event log once per day so events.db stays bounded over months."""
-        today = datetime.now().date()
+        today = _local_now().date()
         if self.last_prune_date == today:
             return
         self.last_prune_date = today
@@ -602,30 +682,57 @@ class Engine:
         except Exception as exc:  # noqa: BLE001 - housekeeping must never affect the loop
             log.warning("Event log prune failed: %s", exc)
 
-    # -- daily self-test of the Proxmox API credentials ---------------------
+    # -- scheduled self-test of the Proxmox API credentials -----------------
     async def _maybe_selftest(self) -> None:
-        """Run the credential self-test once per day at/after the configured hour."""
+        """Run the credential self-test once per scheduled slot (see selftest_slot())."""
         cfg = self.cfg
         if not cfg.selftest_enabled or not cfg.hosts:
             return
-        now = datetime.now()  # server local time, matches selftest_hour
-        if self.last_selftest_date == now.date() or now.hour < cfg.selftest_hour:
+        # Never spend the poll budget on credential checks during an outage: every host
+        # costs up to 10 s and the battery countdown has to stay responsive. No latch is
+        # set, so the test runs at the next slot once mains are back.
+        if self.shutdown_triggered or any(
+            rt.on_battery_since is not None or rt.state.on_battery
+            for rt in self.ups_rt.values()
+        ):
             return
-        self.last_selftest_date = now.date()
+
+        slot = selftest_slot(_local_now(), cfg.selftest_hour, cfg.selftest_interval_min)
+        # ">" rather than "!=": lowering the start hour at runtime moves the slot
+        # backwards, which must not fire an extra run.
+        if self.last_selftest_slot is not None and slot <= self.last_selftest_slot:
+            return
+        # Latch and persist *before* running: a crash halfway through the test must not
+        # turn into a restart loop that hammers the Proxmox API.
+        self.last_selftest_slot = slot
+        self._persist_state()
         await self._run_selftest()
 
     async def _run_selftest(self) -> None:
         """Verify token + Sys.PowerMgmt per host. Success is logged quietly (no notify),
         failure is emitted (notify) so a broken credential is noticed."""
+        hosts = self.cfg.ordered_hosts()
+        # Concurrently: sequentially, five unreachable hosts would stall the poll loop for
+        # 5 x 10 s. gather preserves the order, so the events stay in host order.
+        results = await asyncio.gather(*(proxmox.test_connection(h) for h in hosts))
+        today = _local_now().date()
         ok_all = True
-        for host in self.cfg.ordered_hosts():
-            result = await proxmox.test_connection(host)
+        for host, result in zip(hosts, results):
             if result.ok and result.has_power_mgmt:
-                self._log_quiet(f"Self-test {host.name}: ok", result.message, db.INFO)
+                # At a 15-minute cadence a quiet "ok" per host and run would be ~100
+                # events per host per day and drown the 48 h event feed. Write one per
+                # day, plus whenever the test recovers from a failure; otherwise the
+                # process log is enough.
+                if self.last_selftest_ok is False or self.last_selftest_ok_logged != today:
+                    self._log_quiet(f"Self-test {host.name}: ok", result.message, db.INFO)
+                else:
+                    log.info("Self-test %s: ok — %s", host.name, result.message)
             else:
                 ok_all = False
                 sev = db.WARNING if result.ok else db.CRITICAL
                 await self._emit(f"Self-test {host.name}: FAILED", result.message, sev)
+        if ok_all:
+            self.last_selftest_ok_logged = today
         self.last_selftest_ok = ok_all
         self.last_selftest_at = _now()
 
@@ -788,6 +895,16 @@ class Engine:
                     self.last_selftest_at.isoformat() if self.last_selftest_at else None
                 ),
                 "last_selftest_ok": self.last_selftest_ok,
+                # Naive LOCAL time (no offset), unlike last_selftest_at above: it is a
+                # position on the wall-clock grid, not a UTC instant.
+                "next_selftest_at": (
+                    (
+                        self.last_selftest_slot
+                        + timedelta(minutes=self.cfg.selftest_interval_min)
+                    ).isoformat()
+                    if self.cfg.selftest_enabled and self.last_selftest_slot
+                    else None
+                ),
             },
             "ups": ups_list,
             "shutdown": {

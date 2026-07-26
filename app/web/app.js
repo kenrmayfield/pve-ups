@@ -510,6 +510,7 @@ async function loadConfig() {
   setVal("tz_timezone", c.timezone);
   setChk("selftest_enabled", c.selftest_enabled);
   setVal("selftest_hour", c.selftest_hour);
+  setVal("selftest_interval_min", c.selftest_interval_min);
 
   const wh = c.notifications.webhook;
   setChk("webhook_enabled", wh.enabled); setVal("webhook_url", wh.url);
@@ -725,6 +726,9 @@ function buildConfig() {
     timezone: getVal("tz_timezone").trim(),
     selftest_enabled: getChk("selftest_enabled"),
     selftest_hour: getNum("selftest_hour") ?? 9,
+    // Must be sent: the server rebuilds the config from this payload alone, so a missing
+    // field would silently fall back to its default on every save.
+    selftest_interval_min: getNum("selftest_interval_min") ?? 1440,
     ups: currentUpsList(),
     hosts,
     thresholds: {
