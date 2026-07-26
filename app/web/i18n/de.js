@@ -241,6 +241,15 @@ I18N.de = {
   // SNMP test button messages
   "snmp.ok": "✓ erreichbar – Quelle {src}, Akku {batt}, {min} min, {pct}%",
   "snmp.fail": "✗ nicht erreichbar: {err}",
+  "snmp.diag": "Details je SNMP-Objekt (OID)",
+  "snmp.diagHead": "{ok} von {n} Objekten beantwortet",
+  "snmp.st.ok": "ok",
+  "snmp.st.noSuchObject": "nicht vorhanden (noSuchObject)",
+  "snmp.st.noSuchInstance": "nicht vorhanden (noSuchInstance)",
+  "snmp.st.endOfMibView": "Ende der MIB-Sicht",
+  "snmp.st.noSuchName": "nicht vorhanden (noSuchName – SNMPv1)",
+  "snmp.st.error": "Fehler: {err}",
+  "snmp.st.skipped": "nicht abgefragt (nach dem ersten Fehler abgebrochen)",
 
   // dynamic UPS config card (settings)
   "cfg.name": "Name",

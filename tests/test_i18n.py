@@ -67,3 +67,16 @@ def test_app_js_keys_exist_in_english_dictionary():
     used = {k for k in T_CALL_RE.findall(src) if not k.endswith(".")}
     assert used, "no t() calls found in app.js"
     assert used <= en, f"app.js references unknown keys: {sorted(used - en)}"
+
+
+def test_snmp_probe_status_keys_exist_in_both_dictionaries():
+    """Every per-OID probe status the backend can emit needs a UI label in EN and DE."""
+    from app.ups import PROBE_STATUSES
+
+    en, de = set(dict_keys("en.js")), set(dict_keys("de.js"))
+    missing = [
+        f"snmp.st.{status}"
+        for status in PROBE_STATUSES
+        if f"snmp.st.{status}" not in en or f"snmp.st.{status}" not in de
+    ]
+    assert not missing, f"probe statuses without a dictionary entry: {missing}"

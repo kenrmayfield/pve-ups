@@ -894,3 +894,222 @@ def test_ingest_agent_result_logs_exactly_once(tmp_path, monkeypatch):
 
     assert len(events) == 1
     assert seen.read_text(encoding="utf-8") == "J1"
+
+
+# --- SNMP probe diagnostics (v3.1.0) ---------------------------------------
+def test_probe_names_cover_every_queried_oid():
+    from app import ups
+
+    assert set(ups._OID_NAMES) == set(ups._ALL_OIDS)
+
+
+def test_probe_entry_classifies_missing_objects():
+    """v2c/v3 report a missing object as a per-varbind sentinel, not as an error."""
+    from pysnmp.proto import rfc1905
+
+    from app import ups
+
+    # A list, not a dict: all three sentinels are Null values and compare equal, so as
+    # dict keys they would collapse into one entry.
+    cases = [
+        (rfc1905.noSuchObject, "noSuchObject"),
+        (rfc1905.noSuchInstance, "noSuchInstance"),
+        (rfc1905.endOfMibView, "endOfMibView"),
+    ]
+    for sentinel, expected in cases:
+        entry = ups._probe_entry(
+            ups.OID_CHARGE_REMAINING, None, 0, 0, [(ups.OID_CHARGE_REMAINING, sentinel)]
+        )
+        assert entry.status == expected
+        assert entry.name == "upsEstimatedChargeRemaining"
+
+
+def test_probe_entry_maps_snmpv1_no_such_name():
+    """errorStatus 2 is how SNMPv1 says 'no such object' - not a transport failure."""
+    from pysnmp.proto import rfc1905
+
+    from app import ups
+
+    entry = ups._probe_entry(ups.OID_MINUTES_REMAINING, None, rfc1905.errorStatus.clone(2), 1, [])
+    assert entry.status == "noSuchName"
+    assert entry.error is None
+
+    other = ups._probe_entry(ups.OID_MINUTES_REMAINING, None, rfc1905.errorStatus.clone(5), 3, [])
+    assert other.status == "error"
+    assert "index 3" in other.error
+
+
+def test_probe_entry_reports_transport_errors():
+    from app import ups
+
+    entry = ups._probe_entry(ups.OID_OUTPUT_SOURCE, "No SNMP response received", 0, 0, [])
+    assert entry.status == "error"
+    assert entry.error == "No SNMP response received"
+
+
+def test_probe_entry_interprets_enum_values():
+    from pysnmp.proto.rfc1902 import Integer, OctetString
+
+    from app import ups
+
+    src = ups._probe_entry(
+        ups.OID_OUTPUT_SOURCE, None, 0, 0, [(ups.OID_OUTPUT_SOURCE, Integer(5))]
+    )
+    assert src.status == "ok"
+    assert src.value == "battery (5)"
+
+    bat = ups._probe_entry(
+        ups.OID_BATTERY_STATUS, None, 0, 0, [(ups.OID_BATTERY_STATUS, Integer(3))]
+    )
+    assert bat.value == "low (3)"
+
+    pct = ups._probe_entry(
+        ups.OID_CHARGE_REMAINING, None, 0, 0, [(ups.OID_CHARGE_REMAINING, Integer(42))]
+    )
+    assert pct.value == "42"
+
+    name = ups._probe_entry(
+        ups.OID_IDENT_MODEL, None, 0, 0, [(ups.OID_IDENT_MODEL, OctetString(" Smart-UPS "))]
+    )
+    assert name.value == "Smart-UPS"
+
+
+def test_probe_entry_never_raises_on_a_hostile_value():
+    from app import ups
+
+    class Hostile:
+        def prettyPrint(self):
+            raise RuntimeError("boom")
+
+        def __str__(self):
+            raise RuntimeError("boom")
+
+    entry = ups._probe_entry(ups.OID_IDENT_MODEL, None, 0, 0, [(ups.OID_IDENT_MODEL, Hostile())])
+    assert entry.status == "error"
+    assert "boom" in entry.error
+
+
+def test_probe_entry_only_emits_declared_statuses():
+    from pysnmp.proto import rfc1905
+    from pysnmp.proto.rfc1902 import Integer
+
+    from app import ups
+
+    responses = [
+        ("timeout", 0, 0, []),
+        (None, rfc1905.errorStatus.clone(2), 1, []),
+        (None, rfc1905.errorStatus.clone(5), 1, []),
+        (None, 0, 0, []),
+        (None, 0, 0, [(ups.OID_OUTPUT_SOURCE, Integer(3))]),
+        (None, 0, 0, [(ups.OID_OUTPUT_SOURCE, rfc1905.noSuchObject)]),
+    ]
+    for response in responses:
+        entry = ups._probe_entry(ups.OID_OUTPUT_SOURCE, *response)
+        assert entry.status in ups.PROBE_STATUSES
+
+
+@pytest.mark.asyncio
+async def test_probe_of_unconfigured_ups_skips_everything():
+    from app import ups
+
+    result = await ups.probe(SnmpConfig())
+    assert result.reachable is False
+    assert result.total == len(ups._ALL_OIDS)
+    assert [e.status for e in result.entries] == ["skipped"] * result.total
+    assert "not configured" in result.summary
+
+
+@pytest.mark.asyncio
+async def test_probe_closes_engine_exactly_once_and_stops_early(monkeypatch):
+    """One SnmpEngine for all single-OID GETs (no fd leak), and no seven-timeout wait."""
+    from app import ups
+
+    closed: list = []
+    monkeypatch.setattr(ups, "_close_engine", lambda eng: closed.append(eng))
+
+    cfg = SnmpConfig(host="127.0.0.1", port=1, timeout_s=0.1, retries=0)
+    result = await ups.probe(cfg)
+
+    assert len(closed) == 1
+    assert closed[0] is not None
+    assert result.reachable is False
+    assert result.ok_count == 0
+    assert len(result.entries) == len(ups._ALL_OIDS)
+    assert result.entries[0].status == "error"
+    # Everything after the first failure is reported without waiting for its own timeout.
+    assert all(e.status == "skipped" for e in result.entries[1:])
+
+
+@pytest.mark.asyncio
+async def test_probe_summary_names_the_target_but_never_the_secret(monkeypatch):
+    from app import ups
+
+    monkeypatch.setattr(ups, "_close_engine", lambda eng: None)
+    cfg = SnmpConfig(host="127.0.0.1", port=1, timeout_s=0.1, retries=0, community="s3cr3t")
+    result = await ups.probe(cfg)
+
+    assert "127.0.0.1:1" in result.summary
+    assert "s3cr3t" not in result.summary
+
+
+def test_probe_summary_flags_the_snmpv1_multi_get_trap():
+    from app import ups
+
+    cfg = SnmpConfig(host="10.0.0.5", port=161, version=SnmpVersion.v1)
+    result = ups.ProbeResult(total=2, ok_count=1)
+    result.entries = [
+        ups.ProbeEntry(
+            oid=ups.OID_OUTPUT_SOURCE, name="upsOutputSource", status="ok", value="mains (3)"
+        ),
+        ups.ProbeEntry(
+            oid=ups.OID_MINUTES_REMAINING,
+            name="upsEstimatedMinutesRemaining",
+            status="noSuchName",
+        ),
+    ]
+    summary = ups._probe_summary(cfg, result, None)
+
+    assert "upsEstimatedMinutesRemaining" in summary
+    assert "v2c" in summary
+
+
+@pytest.mark.asyncio
+async def test_api_test_snmp_returns_probe_details_without_secrets(monkeypatch):
+    """The test endpoint carries the per-OID diagnosis and never echoes credentials."""
+    import json
+
+    from app import main, ups
+
+    cfg = AppConfig(ups=[SnmpConfig(id="u1", host="10.0.0.5", community="s3cr3t")])
+    monkeypatch.setattr(main, "engine", Engine(cfg))
+
+    async def fake_poll(_cfg):
+        return UpsState(reachable=True, power_source="mains", battery_status="normal")
+
+    async def fake_probe(_cfg):
+        result = ups.ProbeResult(
+            reachable=True, summary="All 1 objects answered.", ok_count=1, total=1
+        )
+        result.entries = [
+            ups.ProbeEntry(
+                oid=ups.OID_OUTPUT_SOURCE,
+                name="upsOutputSource",
+                status="ok",
+                value="mains (3)",
+                raw="3",
+            )
+        ]
+        return result
+
+    monkeypatch.setattr(main.ups, "poll", fake_poll)
+    monkeypatch.setattr(main.ups, "probe", fake_probe)
+
+    # Masked community -> reconciled from the stored UPS, so the stored secret is in play.
+    body = await main.api_test_snmp(
+        {"id": "u1", "host": "10.0.0.5", "community": main.SECRET_PLACEHOLDER}
+    )
+
+    assert body["reachable"] is True
+    assert body["probe"]["entries"][0]["name"] == "upsOutputSource"
+    assert body["probe"]["ok_count"] == 1
+    assert "s3cr3t" not in json.dumps(body)

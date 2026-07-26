@@ -390,7 +390,11 @@ function addUpsCard(u, open) {
       <button class="btn-ghost btn-sm u_test" style="flex:0 0 auto">${esc(t("cfg.testSnmp"))}</button>
       <button class="btn-ghost btn-sm u_del" style="flex:0 0 auto">${esc(t("cfg.removeUps"))}</button>
       <span class="muted u_msg"></span>
-    </div>`;
+    </div>
+    <details class="help u_diagwrap" hidden style="margin-top:.5rem">
+      <summary>${esc(t("snmp.diag"))}</summary>
+      <pre class="u_diag" style="white-space:pre-wrap;overflow:auto;max-height:16rem;font-family:monospace;font-size:.85em"></pre>
+    </details>`;
   const toggleVer = () => {
     const v3 = div.querySelector(".u_version").value === "v3";
     div.querySelector(".u_v3").hidden = !v3;
@@ -447,15 +451,39 @@ function currentUpsList() {
     .map(upsFromCard).filter((u) => u.host || u.name);
 }
 
+// One line per RFC 1628 object, so a user can see exactly which one the UPS is missing.
+// Status words come from the dictionary, the summary is the backend's English text
+// (like every other API message).
+function renderProbe(p) {
+  const lines = (p.entries || []).map((e) => {
+    const st = t("snmp.st." + e.status, { err: e.error || "" });
+    return e.name.padEnd(30) + e.oid.padEnd(24) + st + (e.status === "ok" ? " = " + e.value : "");
+  });
+  return [t("snmp.diagHead", { ok: p.ok_count, n: p.total }), p.summary || "", ""]
+    .concat(lines).join("\n");
+}
+
 async function testUps(div) {
   const msg = div.querySelector(".u_msg");
+  const wrap = div.querySelector(".u_diagwrap");
+  const pre = div.querySelector(".u_diag");
   msg.textContent = t("msg.testing");
+  wrap.hidden = true;
   try {
     const r = await api("/api/test/snmp", "POST", upsFromCard(div));
     msg.textContent = r.reachable
       ? t("snmp.ok", { src: r.power_source, batt: r.battery_status, min: r.runtime_remaining_min, pct: r.battery_charge_pct })
       : t("snmp.fail", { err: r.error || "" });
-  } catch (e) { msg.textContent = "✗ " + e.message; }
+    if (r.probe) {
+      const trouble = !r.reachable || r.probe.ok_count < r.probe.total;
+      pre.textContent = renderProbe(r.probe);
+      wrap.hidden = false;
+      wrap.open = trouble;  // unfold on its own exactly when there is something to see
+      // classList, not className: the latter would drop the u_diagwrap selector class.
+      wrap.classList.toggle("warnnote", trouble);
+      wrap.classList.toggle("help", !trouble);
+    }
+  } catch (e) { msg.textContent = "✗ " + e.message; wrap.hidden = true; }
 }
 
 async function loadConfig() {

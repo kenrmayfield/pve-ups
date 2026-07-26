@@ -61,6 +61,40 @@ _BATTERY_STATUS = {
     4: "depleted",
 }
 
+# Object names as spelled in RFC 1628, shown per OID by the manual probe so a user can
+# look the object up in the UPS vendor's documentation.
+_OID_NAMES = {
+    OID_IDENT_MANUFACTURER: "upsIdentManufacturer",
+    OID_IDENT_MODEL: "upsIdentModel",
+    OID_OUTPUT_SOURCE: "upsOutputSource",
+    OID_BATTERY_STATUS: "upsBatteryStatus",
+    OID_SECONDS_ON_BATTERY: "upsSecondsOnBattery",
+    OID_MINUTES_REMAINING: "upsEstimatedMinutesRemaining",
+    OID_CHARGE_REMAINING: "upsEstimatedChargeRemaining",
+}
+
+# Closed set of per-OID probe outcomes. The UI labels each one via the i18n key
+# "snmp.st.<status>", so a new status here needs a matching key in both dictionaries
+# (app/web/i18n/en.js + de.js) — tests/test_i18n.py enforces that.
+PROBE_STATUSES = (
+    "ok",
+    "noSuchObject",
+    "noSuchInstance",
+    "endOfMibView",
+    "noSuchName",
+    "error",
+    "skipped",
+)
+
+# v2c/v3 report a missing object as a per-varbind sentinel value instead of an error.
+# Matched by class name, not isinstance: the classes moved between pysnmp 6.x and 7.x,
+# and an unrecognised sentinel must not be mistaken for a real value.
+_MISSING_SENTINELS = {
+    "NoSuchObject": "noSuchObject",
+    "NoSuchInstance": "noSuchInstance",
+    "EndOfMibView": "endOfMibView",
+}
+
 
 @dataclass
 class UpsState:
@@ -83,6 +117,29 @@ class UpsState:
     @property
     def battery_low(self) -> bool:
         return self.battery_status in ("low", "depleted")
+
+
+@dataclass
+class ProbeEntry:
+    """Outcome of a single-OID GET during the manual SNMP test."""
+
+    oid: str
+    name: str                       # RFC 1628 object name, e.g. "upsOutputSource"
+    status: str                     # one of PROBE_STATUSES
+    value: Optional[str] = None     # interpreted value, e.g. "battery (5)" (status "ok")
+    raw: Optional[str] = None       # value as the device spelled it (status "ok")
+    error: Optional[str] = None     # English error text (status "error")
+
+
+@dataclass
+class ProbeResult:
+    """Per-object diagnosis of one UPS. Manual test button only, never the poll loop."""
+
+    reachable: bool = False         # at least one object answered
+    summary: str = ""               # short English overall diagnosis, free of secrets
+    ok_count: int = 0
+    total: int = 0
+    entries: list[ProbeEntry] = field(default_factory=list)
 
 
 def _auth_protocol(proto: SnmpAuthProto):
@@ -192,6 +249,24 @@ def _coerce_str(value) -> Optional[str]:
     return text or None
 
 
+def _pretty(value) -> str:
+    """Value as the device spelled it, across pysnmp types that lack prettyPrint()."""
+    printer = getattr(value, "prettyPrint", None)
+    return printer() if callable(printer) else str(value)
+
+
+def _interpret(oid: str, value) -> str:
+    """Readable form of one probed value: enums carry their meaning, text is trimmed."""
+    if oid in (OID_OUTPUT_SOURCE, OID_BATTERY_STATUS):
+        table = _OUTPUT_SOURCE if oid == OID_OUTPUT_SOURCE else _BATTERY_STATUS
+        num = _coerce_int(value)
+        return f"{table.get(num, 'unknown')} ({num})" if num is not None else _pretty(value)
+    if oid in (OID_IDENT_MANUFACTURER, OID_IDENT_MODEL):
+        return _coerce_str(value) or "(empty)"
+    num = _coerce_int(value)
+    return str(num) if num is not None else _pretty(value)
+
+
 async def poll(cfg: SnmpConfig) -> UpsState:
     """Poll the UPS once. Never raises; failures return reachable=False."""
     state = UpsState(last_poll=datetime.now(timezone.utc))
@@ -209,8 +284,8 @@ async def poll(cfg: SnmpConfig) -> UpsState:
             SnmpEngine,
         )
 
-        # Das GET-Kommando heisst in pysnmp 6.x `getCmd`, ab 7.x `get_cmd`
-        # (gleiche Signatur und Rueckgabe). Beide Varianten unterstuetzen.
+        # The GET command is called `getCmd` in pysnmp 6.x and `get_cmd` from 7.x on
+        # (same signature and return value). Support both.
         try:
             from pysnmp.hlapi.asyncio import getCmd  # pysnmp 6.x
         except ImportError:
@@ -260,3 +335,137 @@ async def poll(cfg: SnmpConfig) -> UpsState:
         # Always release the engine's socket/dispatcher — especially on the common
         # timeout/unreachable path, which would otherwise leak fastest.
         _close_engine(engine)
+
+
+def _probe_entry(oid, error_indication, error_status, error_index, var_binds) -> ProbeEntry:
+    """Classify the response of one single-OID GET. Never raises."""
+    entry = ProbeEntry(oid=oid, name=_OID_NAMES.get(oid, oid), status="error")
+    try:
+        if error_indication:
+            # Transport level: timeout, unknown v3 user, wrong auth key, DNS failure.
+            entry.error = str(error_indication)
+            return entry
+        if error_status:
+            # noSuchName (errorStatus 2) is how SNMPv1 says "no such object here" —
+            # the v1 counterpart of the v2c sentinels handled below.
+            if _coerce_int(error_status) == 2:
+                entry.status = "noSuchName"
+            else:
+                entry.error = f"{error_status.prettyPrint()} at index {error_index}"
+            return entry
+        if not var_binds:
+            entry.error = "empty response"
+            return entry
+
+        _, value = var_binds[0]
+        missing = _MISSING_SENTINELS.get(type(value).__name__)
+        if missing:
+            entry.status = missing
+            return entry
+        entry.status = "ok"
+        entry.raw = _pretty(value)
+        entry.value = _interpret(oid, value)
+        return entry
+    except Exception as exc:  # noqa: BLE001 - an odd ASN.1 type must not kill the test
+        entry.status = "error"
+        entry.error = str(exc)
+        return entry
+
+
+def _probe_summary(cfg: SnmpConfig, result: ProbeResult, first_error: Optional[str]) -> str:
+    """Short English overall diagnosis. Must never contain community or v3 secrets."""
+    where = f"{cfg.host}:{cfg.port} (SNMP {cfg.version.value})"
+    if result.ok_count == 0:
+        reason = first_error or "no object answered"
+        return (
+            f"No usable SNMP response from {where}: {reason}. Check address and port, the "
+            f"SNMP credentials, and any firewall on UDP {cfg.port}."
+        )
+
+    missing = [e.name for e in result.entries
+               if e.status in ("noSuchObject", "noSuchInstance", "noSuchName", "endOfMibView")]
+    failed = [e.name for e in result.entries if e.status == "error"]
+    if not missing and not failed:
+        return f"All {result.total} RFC 1628 objects answered on {where}."
+
+    parts = [f"{result.ok_count} of {result.total} objects answered on {where}."]
+    if missing:
+        parts.append("Not provided by this UPS: " + ", ".join(missing) + ".")
+        if any(e.status == "noSuchName" for e in result.entries):
+            parts.append(
+                "SNMPv1 aborts a multi-object GET as soon as one object is missing, so the "
+                "regular poll fails entirely — use SNMP v2c if the UPS supports it."
+            )
+    if failed:
+        parts.append("Failed: " + ", ".join(failed) + ".")
+    return " ".join(parts)
+
+
+async def probe(cfg: SnmpConfig) -> ProbeResult:
+    """Query every RFC 1628 object individually — manual test button only.
+
+    poll() sends all seven objects in one GET: fast, but a single object the device does
+    not implement makes the whole PDU fail under SNMPv1, so a user cannot tell a wrong
+    community from a UPS that simply lacks upsSecondsOnBattery. One GET per object answers
+    exactly that question. Never raises; the poll loop keeps using poll() unchanged.
+    """
+    result = ProbeResult(total=len(_ALL_OIDS))
+
+    def _skipped(oid: str) -> ProbeEntry:
+        return ProbeEntry(oid=oid, name=_OID_NAMES.get(oid, oid), status="skipped")
+
+    if not cfg.configured:
+        result.entries = [_skipped(oid) for oid in _ALL_OIDS]
+        result.summary = "SNMP not configured (no host set)."
+        return result
+
+    engine = None
+    first_error: Optional[str] = None
+    try:
+        from pysnmp.hlapi.asyncio import (
+            ContextData,
+            ObjectIdentity,
+            ObjectType,
+            SnmpEngine,
+        )
+
+        # Same 6.x/7.x naming dance as poll().
+        try:
+            from pysnmp.hlapi.asyncio import getCmd  # pysnmp 6.x
+        except ImportError:
+            from pysnmp.hlapi.asyncio import get_cmd as getCmd  # pysnmp 7.x
+
+        engine = SnmpEngine()
+        auth = _auth_data(cfg)
+        transport = await _make_transport(cfg)
+
+        for oid in _ALL_OIDS:
+            response = await getCmd(
+                engine, auth, transport, ContextData(), ObjectType(ObjectIdentity(oid))
+            )
+            entry = _probe_entry(oid, *response)
+            result.entries.append(entry)
+            if entry.status == "error":
+                if first_error is None:
+                    first_error = entry.error
+                # Give up while nothing has answered at all: seven timeouts in a row cost
+                # timeout x (retries+1) x 7 — 42 s with the defaults — and the user is
+                # waiting in front of the test button. The remaining objects stay
+                # "skipped", which says the same thing without the wait.
+                if not any(e.status == "ok" for e in result.entries):
+                    break
+
+    except Exception as exc:  # noqa: BLE001 - the test button must never 500
+        log.warning("SNMP probe failed: %s", exc)
+        if first_error is None:
+            first_error = str(exc)
+
+    finally:
+        _close_engine(engine)
+
+    probed = {e.oid for e in result.entries}
+    result.entries.extend(_skipped(oid) for oid in _ALL_OIDS if oid not in probed)
+    result.ok_count = sum(1 for e in result.entries if e.status == "ok")
+    result.reachable = result.ok_count > 0
+    result.summary = _probe_summary(cfg, result, first_error)
+    return result

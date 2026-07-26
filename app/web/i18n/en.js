@@ -241,6 +241,15 @@ I18N.en = {
   // SNMP test button messages
   "snmp.ok": "✓ reachable — source {src}, battery {batt}, {min} min, {pct}%",
   "snmp.fail": "✗ unreachable: {err}",
+  "snmp.diag": "Details per SNMP object (OID)",
+  "snmp.diagHead": "{ok} of {n} objects answered",
+  "snmp.st.ok": "ok",
+  "snmp.st.noSuchObject": "not present (noSuchObject)",
+  "snmp.st.noSuchInstance": "not present (noSuchInstance)",
+  "snmp.st.endOfMibView": "end of MIB view",
+  "snmp.st.noSuchName": "not present (noSuchName — SNMPv1)",
+  "snmp.st.error": "error: {err}",
+  "snmp.st.skipped": "not queried (stopped after the first failure)",
 
   // dynamic UPS config card (settings)
   "cfg.name": "Name",

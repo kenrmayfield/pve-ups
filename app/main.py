@@ -14,6 +14,7 @@ import tarfile
 import time
 import zipfile
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -468,6 +469,15 @@ async def api_test_snmp(incoming: dict):
         "runtime_remaining_min": state.runtime_remaining_min,
         "battery_charge_pct": state.battery_charge_pct,
         "error": state.error,
+        "manufacturer": state.manufacturer,
+        "model": state.model,
+        "probe": {
+            "reachable": diag.reachable,
+            "summary": diag.summary,
+            "ok_count": diag.ok_count,
+            "total": diag.total,
+            "entries": [asdict(e) for e in diag.entries],
+        },
     }
 
 
