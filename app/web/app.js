@@ -56,9 +56,11 @@ function show(view) {
 
 // --- bootstrap --------------------------------------------------------------
 let pollTimer = null;
+let deployment = "lxc";  // "lxc" (default) or "docker" - set from /api/session in boot()
 
 async function boot() {
   const s = await api("/api/session");
+  deployment = s.deployment || "lxc";
   if (!s.password_set) { show("firstrun"); return; }
   if (!s.authenticated) { show("login"); return; }
   $("logoutBtn").hidden = false;
@@ -68,7 +70,19 @@ async function boot() {
 function enterApp() {
   $("mainNav").hidden = false;
   show("dashboard");
+  applyDeploymentMode();
   startDashboard();
+}
+
+// In Docker deployments there is no privileged agent, so the NTP/timezone fields and
+// the in-app update uploader have no effect - hide them and show guidance instead.
+function applyDeploymentMode() {
+  if (deployment !== "docker") return;
+  const timeRow = $("sysTimeRow"); if (timeRow) timeRow.hidden = true;
+  const timeNote = $("sysDockerNote"); if (timeNote) timeNote.hidden = false;
+  const updBtnRow = $("updBtnRow"); if (updBtnRow) updBtnRow.hidden = true;
+  const updDiagWrap = $("updDiagWrap"); if (updDiagWrap) updDiagWrap.hidden = true;
+  const updNote = $("updDockerNote"); if (updNote) updNote.hidden = false;
 }
 
 // --- auth -------------------------------------------------------------------
@@ -767,6 +781,7 @@ async function refreshUpdateStatus() {
   let r;
   try { r = await api("/api/update/status"); } catch (_) { return null; }
   $("upd_version").textContent = "v" + r.version;
+  if (deployment === "docker") return r;  // no agent queue/log to render; UI shows guidance instead
 
   // diagnose block (read-only): queue + agent log tail
   const diag = $("upd_diag");

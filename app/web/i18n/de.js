@@ -224,6 +224,7 @@ I18N.de = {
   "upd.uploaded": "✓ Hochgeladen (Paketversion {v}). Wird angewendet…",
   "upd.unknown": "unbekannt",
   "upd.sameVersion": " ⚠ Achtung: Paketversion entspricht der laufenden Version {v} – das Paket enthält evtl. nicht die neue Version (mit make-dist aus der Arbeitskopie bauen).",
+  "upd.dockerNote": "Updates im Docker-Modus: neues Image-Tag ziehen und den Container neu erstellen (<code>docker compose pull &amp;&amp; docker compose up -d</code>). Konfiguration und Eventlog bleiben in den eingebundenen Volumes erhalten.",
 
   // settings: change password
   "pw.title": "Passwort ändern",

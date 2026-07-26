@@ -238,10 +238,11 @@
       <div class="card">
         <div class="card-h"><h3><span class="section-num">5</span> <span data-i18n="sys.title">System</span></h3>
           <a class="doclink" href="/manual.html#updates" data-manual="updates" target="_blank" rel="noopener" title="Read in the manual: Updates &amp; operation" data-i18n-title="sys.doc"><svg class="icon"><use href="#i-help"></use></svg></a></div>
-        <div class="row">
+        <div class="row" id="sysTimeRow">
           <label title="Time server for the appliance. Empty = leave the system default." data-i18n-title="sys.ntpTitle"><span data-i18n="sys.ntp">NTP server</span> <input id="ntp_server" placeholder="e.g. pool.ntp.org (empty = unchanged)" data-i18n-placeholder="sys.ntpPh" /></label>
           <label title="Timezone of the appliance (IANA name). Empty = leave the system default." data-i18n-title="sys.tzTitle"><span data-i18n="sys.tz">Timezone</span> <input id="tz_timezone" placeholder="e.g. Europe/Berlin (empty = unchanged)" data-i18n-placeholder="sys.tzPh" /></label>
         </div>
+        <p class="help" id="sysDockerNote" hidden data-i18n="sys.dockerNote">Time and timezone are controlled by the Docker host / orchestrator, not by this container.</p>
         <label class="switch"
           title="Checks once a day per host whether the API token still works." data-i18n-title="sys.selftestTitle">
           <input type="checkbox" id="selftest_enabled" />
@@ -272,15 +273,16 @@
         <p class="help"><span data-i18n="upd.current">Current version:</span> <b id="upd_version">–</b>.
           <span data-i18n="upd.helpRest">Upload a release package (.tar.gz/.zip); the system applies it and restarts the service.</span></p>
         <input type="file" id="updateFile" accept=".tar.gz,.tgz,.zip" hidden />
-        <div class="row" style="margin:0;align-items:center">
+        <div class="row" id="updBtnRow" style="margin:0;align-items:center">
           <button id="updateBtn" class="btn-warn" style="flex:0 0 auto"><svg class="icon"><use href="#i-upload"></use></svg> <span data-i18n="upd.upload">Upload update package …</span></button>
           <span class="muted" id="updateMsg"></span>
         </div>
         <p class="help" id="upd_result"></p>
-        <details class="help" style="margin-top:.5rem">
+        <details class="help" id="updDiagWrap" style="margin-top:.5rem">
           <summary data-i18n="upd.diag">Diagnostics (queue &amp; agent log)</summary>
           <pre id="upd_diag" style="white-space:pre-wrap;overflow:auto;max-height:16rem;font-family:monospace;font-size:.85em"></pre>
         </details>
+        <p class="help" id="updDockerNote" hidden data-i18n-html="upd.dockerNote"></p>
       </div>
 
       <div class="card">

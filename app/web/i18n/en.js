@@ -224,6 +224,7 @@ I18N.en = {
   "upd.uploaded": "✓ Uploaded (package version {v}). Applying…",
   "upd.unknown": "unknown",
   "upd.sameVersion": " ⚠ Warning: the package version equals the running version {v} — the package may not contain the new version (build it with make-dist from the working copy).",
+  "upd.dockerNote": "Updates in Docker mode: pull a new image tag and recreate the container (<code>docker compose pull &amp;&amp; docker compose up -d</code>). Config and event log persist in the mounted volumes.",
 
   // settings: change password
   "pw.title": "Change password",

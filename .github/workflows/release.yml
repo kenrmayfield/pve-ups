@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
   release:
@@ -45,3 +46,42 @@ jobs:
           files: |
             dist/pve-usv-*.tar.gz
             install.sh
+
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches __version__
+        id: version
+        run: |
+          VERSION="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' app/__init__.py)"
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "Tag v$TAG does not match __version__ $VERSION" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ghcr.io/ffind-dev/pve-ups:${{ steps.version.outputs.version }}
+            ghcr.io/ffind-dev/pve-ups:${{ github.ref_name }}
+            ghcr.io/ffind-dev/pve-ups:latest

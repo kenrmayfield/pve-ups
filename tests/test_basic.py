@@ -769,6 +769,28 @@ def test_read_package_version_from_tar_and_zip(tmp_path):
     assert main._read_package_version(z) == "9.9.9"
 
 
+# --- Docker deployment mode (v3.1.0) -----------------------------------------
+async def test_update_upload_disabled_in_docker_mode(monkeypatch):
+    """There is no privileged agent in a Docker image; the upload endpoint must refuse
+    loudly (501) instead of silently enqueueing a job nothing will ever drain."""
+    from app import main
+
+    monkeypatch.setattr(main, "IS_DOCKER", True)
+    with pytest.raises(main.HTTPException) as exc:
+        await main.api_update_upload(file=None)
+    assert exc.value.status_code == 501
+
+
+async def test_update_status_reports_docker_mode_without_agent_state(monkeypatch):
+    from app import main
+
+    monkeypatch.setattr(main, "IS_DOCKER", True)
+    result = await main.api_update_status()
+    assert result["deployment"] == "docker"
+    assert result["pending"] == []
+    assert result["agent_drainer"] is None
+
+
 # --- SNMP v1 -----------------------------------------------------------------
 def test_snmp_v1_roundtrip_and_message_processing_model(tmp_path):
     from app.ups import _auth_data

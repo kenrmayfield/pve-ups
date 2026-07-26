@@ -26,3 +26,10 @@ snmpdata/       export-ignore
 scripts/        export-ignore
 .gitattributes  export-ignore
 .gitignore      export-ignore
+# Docker deployment files: the tarball is the LXC update package unpacked into
+# /opt/pve-usv, where they have no function (and the Dockerfile would be broken there
+# anyway, since it copies the export-ignored README.md). Docker users take them from
+# the repository; the CI image build uses the checkout, not this archive.
+Dockerfile                  export-ignore
+.dockerignore               export-ignore
+docker-compose.example.yml  export-ignore

@@ -45,6 +45,11 @@ SECRET_PLACEHOLDER = "**********"  # pydantic SecretStr json mask; means "unchan
 SESSION_COOKIE = "pve_usv_session"
 SESSION_MAX_AGE = 8 * 3600
 
+# Deployment mode: "lxc" (default, privileged agent handles NTP/timezone/updates) or
+# "docker" (no agent present; those features are disabled and surfaced to the UI).
+DEPLOYMENT = os.environ.get("PVE_USV_DEPLOYMENT", "lxc").strip().lower()
+IS_DOCKER = DEPLOYMENT == "docker"
+
 # State dir layout (shared with the privileged deploy agent, see deploy/pve-usv-agent.*).
 STATE_DIR = db.DB_PATH.parent
 AGENT_DIR = STATE_DIR / "agent"
@@ -287,6 +292,7 @@ async def api_session(request: Request):
         "authenticated": _is_authenticated(request, engine.cfg),
         "password_set": bool(engine.cfg.ui_password_hash),
         "configured": engine.cfg.configured,
+        "deployment": DEPLOYMENT,
     }
 
 
@@ -381,10 +387,12 @@ async def api_set_config(incoming: dict):
     engine.update_config(new_cfg)
     db.log_event("Configuration saved", "", db.INFO)
     # Apply changed system settings (NTP / timezone) via the privileged agent (needs root).
-    if new_cfg.ntp_server and new_cfg.ntp_server != old_ntp:
-        _enqueue_agent("set-ntp", server=new_cfg.ntp_server)
-    if new_cfg.timezone and new_cfg.timezone != old_tz:
-        _enqueue_agent("set-timezone", tz=new_cfg.timezone)
+    # No agent exists in Docker deployments; the values persist but nothing is enqueued.
+    if not IS_DOCKER:
+        if new_cfg.ntp_server and new_cfg.ntp_server != old_ntp:
+            _enqueue_agent("set-ntp", server=new_cfg.ntp_server)
+        if new_cfg.timezone and new_cfg.timezone != old_tz:
+            _enqueue_agent("set-timezone", tz=new_cfg.timezone)
     return _sanitized_config(new_cfg)
 
 
@@ -428,22 +436,31 @@ async def api_config_import(incoming: dict):
     save_config(new_cfg)
     engine.update_config(new_cfg)
     db.log_event("Configuration imported", "Settings taken over from file.", db.WARNING)
-    if new_cfg.ntp_server:
-        _enqueue_agent("set-ntp", server=new_cfg.ntp_server)
-    if new_cfg.timezone:
-        _enqueue_agent("set-timezone", tz=new_cfg.timezone)
+    # No agent exists in Docker deployments; the values persist but nothing is enqueued.
+    if not IS_DOCKER:
+        if new_cfg.ntp_server:
+            _enqueue_agent("set-ntp", server=new_cfg.ntp_server)
+        if new_cfg.timezone:
+            _enqueue_agent("set-timezone", tz=new_cfg.timezone)
     return _sanitized_config(new_cfg)
 
 
 # --- tests / actions (authenticated) ---------------------------------------
 @app.post("/api/test/snmp", dependencies=[Depends(require_auth)])
 async def api_test_snmp(incoming: dict):
-    """One-shot SNMP poll with the submitted settings (secrets reconciled by UPS id)."""
+    """One-shot SNMP poll with the submitted settings (secrets reconciled by UPS id).
+
+    Runs the production poll *and* a per-object probe: the poll proves the path the engine
+    actually uses works (its single multi-object GET can fail under SNMPv1 even when every
+    object is readable on its own), the probe says which object is to blame.
+    """
     assert engine is not None
     incoming = dict(incoming)
     existing_ups = {u.id: u for u in engine.cfg.ups}
     _reconcile_ups_secrets(incoming, existing_ups.get(incoming.get("id")))
-    state = await ups.poll(SnmpConfig.model_validate(incoming))
+    cfg = SnmpConfig.model_validate(incoming)
+    state = await ups.poll(cfg)
+    diag = await ups.probe(cfg)
     return {
         "reachable": state.reachable,
         "power_source": state.power_source,
@@ -506,6 +523,18 @@ def _read_text(path: Path) -> Optional[str]:
 
 @app.get("/api/update/status", dependencies=[Depends(require_auth)])
 async def api_update_status():
+    if IS_DOCKER:
+        # No privileged agent exists in a Docker deployment; there is no queue/log to
+        # report. The frontend shows "docker pull" guidance instead of this panel.
+        return {
+            "version": __version__,
+            "deployment": "docker",
+            "result": None,
+            "last_job": None,
+            "pending": [],
+            "log_tail": None,
+            "agent_drainer": None,
+        }
     # Ingesting here makes the outcome show up in the event log even if the user never
     # left the settings page open during the restart.
     result = _ingest_agent_result()
@@ -517,6 +546,7 @@ async def api_update_status():
         log_tail = "\n".join(raw.splitlines()[-40:])
     return {
         "version": __version__,
+        "deployment": "lxc",
         "result": result,
         "last_job": last_job,
         "pending": pending,
@@ -527,6 +557,12 @@ async def api_update_status():
 
 @app.post("/api/update/upload", dependencies=[Depends(require_auth)])
 async def api_update_upload(file: UploadFile = File(...)):
+    if IS_DOCKER:
+        raise HTTPException(
+            status_code=501,
+            detail="In-app updates are not supported in Docker deployments. "
+            "Pull a new image tag and recreate the container.",
+        )
     name = file.filename or ""
     if not name.endswith((".tar.gz", ".tgz", ".zip")):
         raise HTTPException(status_code=400, detail="Only .tar.gz/.tgz/.zip allowed")
