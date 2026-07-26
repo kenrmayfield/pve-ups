@@ -69,17 +69,40 @@ def test_app_js_keys_exist_in_english_dictionary():
     assert used <= en, f"app.js references unknown keys: {sorted(used - en)}"
 
 
-def test_snmp_probe_status_keys_exist_in_both_dictionaries():
-    """Every per-OID probe status the backend can emit needs a UI label in EN and DE."""
+def _both_dictionaries_define(prefix: str, names) -> list[str]:
+    en, de = set(dict_keys("en.js")), set(dict_keys("de.js"))
+    return [f"{prefix}{n}" for n in names if f"{prefix}{n}" not in en or f"{prefix}{n}" not in de]
+
+
+def test_probe_status_keys_exist_in_both_dictionaries():
+    """Every per-object probe status the backend can emit needs a UI label in EN and DE."""
     from app.ups import PROBE_STATUSES
 
-    en, de = set(dict_keys("en.js")), set(dict_keys("de.js"))
-    missing = [
-        f"snmp.st.{status}"
-        for status in PROBE_STATUSES
-        if f"snmp.st.{status}" not in en or f"snmp.st.{status}" not in de
-    ]
+    missing = _both_dictionaries_define("probe.st.", PROBE_STATUSES)
     assert not missing, f"probe statuses without a dictionary entry: {missing}"
+
+
+def test_probe_trigger_keys_exist_in_both_dictionaries():
+    """Same for the trigger names a probe reports as unavailable on this device."""
+    from app.ups import PROBE_TRIGGERS
+
+    missing = _both_dictionaries_define("probe.trg.", PROBE_TRIGGERS)
+    assert not missing, f"probe triggers without a dictionary entry: {missing}"
+
+
+def test_source_type_keys_exist_in_both_dictionaries():
+    """Every UPS source type needs a label in EN and DE (wizard dropdown + dashboard)."""
+    from app.config import UPS_SOURCE_MODELS, UpsSourceType
+
+    kinds = [t.value for t in UpsSourceType]
+    assert sorted(kinds) == sorted(UPS_SOURCE_MODELS), "UpsSourceType and the model map drifted apart"
+    missing = _both_dictionaries_define("src.", kinds)
+    assert not missing, f"source types without a dictionary entry: {missing}"
+
+    # The wizard dropdown is built in JS; a type missing there is unreachable in the UI.
+    block = re.search(r"const SOURCE_TYPES = \[(.*?)\];", (WEB / "app.js").read_text(encoding="utf-8"))
+    assert block, "SOURCE_TYPES not found in app.js"
+    assert re.findall(r'\["([a-z]+)"', block.group(1)) == kinds
 
 
 def test_selftest_interval_options_match_the_backend():

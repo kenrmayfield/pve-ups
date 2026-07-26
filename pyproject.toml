@@ -1,12 +1,12 @@
 [project]
 name = "pve-usv"
 dynamic = ["version"]  # single source of truth: app/__init__.py __version__
-description = "PVE-UPS — UPS shutdown appliance for Proxmox VE: web-configured NUT alternative (RFC 1628 SNMP, multi-UPS, LXC)."
+description = "PVE-UPS — UPS shutdown appliance for Proxmox VE: web-configured, no config files (RFC 1628 SNMP or NUT server, multi-UPS, LXC)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Florian Finder" }]
-keywords = ["proxmox", "proxmox-ve", "ups", "snmp", "shutdown", "nut-alternative", "lxc", "rfc1628"]
+keywords = ["proxmox", "proxmox-ve", "ups", "snmp", "nut", "usb-ups", "shutdown", "lxc", "rfc1628"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Web Environment",

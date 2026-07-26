@@ -11,6 +11,7 @@ import pytest
 from app.config import (
     AppConfig,
     HostConfig,
+    NutConfig,
     SnmpConfig,
     SnmpVersion,
     Thresholds,
@@ -92,6 +93,56 @@ def test_config_migrates_single_snmp_to_ups_list():
     assert cfg.hosts[0].ups_ids == ["ups1"]
 
 
+def test_config_defaults_untyped_ups_entries_to_snmp(tmp_path):
+    """Pre-3.2 configs have no ``type``; the discriminated union would reject them."""
+    import yaml
+
+    path = tmp_path / "config.yaml"
+    old = {
+        "ups": [{"id": "a", "name": "A", "host": "10.0.0.1", "community": "sec"}],
+        "hosts": [{"name": "pve01", "api_url": "https://x:8006", "ups_ids": ["a"]}],
+    }
+    path.write_text(yaml.safe_dump(old), encoding="utf-8")
+    cfg = load_config(path)
+    assert isinstance(cfg.ups[0], SnmpConfig)
+    assert cfg.ups[0].type == "snmp"
+    assert cfg.ups[0].community.get_secret_value() == "sec"
+    # ... and the type is written back explicitly on the next save.
+    save_config(cfg, path)
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["ups"][0]["type"] == "snmp"
+
+
+def test_config_roundtrip_mixes_snmp_and_nut_sources(tmp_path):
+    path = tmp_path / "config.yaml"
+    cfg = AppConfig(
+        ups=[
+            SnmpConfig(id="a", name="Card", host="10.0.0.1", community="ca"),
+            NutConfig(id="b", name="USB", host="10.0.0.2", ups_name="ups",
+                      username="monitor", password="np",
+                      overrides=UpsThresholdOverride(charge_below_percent=25)),
+        ],
+        hosts=[HostConfig(name="pve01", api_url="x", ups_ids=["a", "b"], ups_policy="any")],
+    )
+    save_config(cfg, path)
+    loaded = load_config(path)
+
+    assert [type(u).__name__ for u in loaded.ups] == ["SnmpConfig", "NutConfig"]
+    assert loaded.ups[0].community.get_secret_value() == "ca"
+    assert loaded.ups[1].password.get_secret_value() == "np"
+    assert loaded.ups[1].port == 3493
+    assert loaded.ups[1].configured is True
+    # Per-UPS overrides work the same regardless of the source type.
+    assert loaded.effective_thresholds(loaded.ups[1]).charge_below_percent == 25
+
+
+def test_nut_source_is_unconfigured_without_a_ups_name():
+    assert NutConfig(host="10.0.0.2").configured is False
+    assert NutConfig(ups_name="ups").configured is False
+    assert NutConfig(host="10.0.0.2", ups_name="ups").configured is True
+    # Label falls back to something recognisable in events when no name is set.
+    assert NutConfig(host="10.0.0.2", ups_name="ups").label == "ups@10.0.0.2"
+
+
 def test_config_ignores_legacy_smtp_key(tmp_path):
     # Pre-3.0 configs carry a `notifications.smtp` block; it must load without error
     # and disappear from the file on the next save (e-mail was removed in 3.0.0).
@@ -128,6 +179,31 @@ def test_merge_config_reconciles_ups_secrets_by_id():
     }
     merged = main._merge_config(incoming, existing)
     assert merged.ups[0].community.get_secret_value() == "keep"  # placeholder kept old secret
+
+
+def test_merge_config_reconciles_nut_password_and_ignores_the_other_type():
+    """Each source type declares its own secrets; switching type must not inherit any."""
+    from app import main
+
+    existing = AppConfig(
+        ups=[
+            NutConfig(id="n", host="10.0.0.2", ups_name="ups", password="keepme"),
+            SnmpConfig(id="s", host="10.0.0.1", community="oldcomm"),
+        ]
+    )
+    incoming = {
+        "ups": [
+            {"id": "n", "type": "nut", "host": "10.0.0.2", "ups_name": "ups",
+             "password": main.SECRET_PLACEHOLDER},
+            # Same id, but now a NUT source: the stored SNMP community is irrelevant and
+            # the empty password must fall back to the default, not to anything stored.
+            {"id": "s", "type": "nut", "host": "10.0.0.3", "ups_name": "ups", "password": ""},
+        ],
+        "hosts": [],
+    }
+    merged = main._merge_config(incoming, existing)
+    assert merged.ups[0].password.get_secret_value() == "keepme"
+    assert merged.ups[1].password.get_secret_value() == ""
 
 
 # --- ordered_hosts: own host last ------------------------------------------
@@ -185,6 +261,46 @@ def test_no_trigger_when_healthy():
     eng.ups_rt["u"].state = UpsState(reachable=True, power_source="mains",
                                      runtime_remaining_min=60, battery_charge_pct=100)
     assert _reason(eng) is None
+
+
+@pytest.mark.asyncio
+async def test_nut_source_runs_through_the_same_trigger_logic():
+    """The engine must not care how a UPS is read — same thresholds, same latching."""
+    th = Thresholds(on_battery_seconds=None, runtime_below_minutes=None,
+                    charge_below_percent=25, on_battery_low=False)
+    cfg = AppConfig(ups=[NutConfig(id="u", name="USB UPS", host="127.0.0.1", ups_name="ups")],
+                    thresholds=th)
+    eng = Engine(cfg)
+
+    eng.ups_rt["u"].state = UpsState(reachable=True, power_source="battery",
+                                     battery_charge_pct=20)
+    await eng._evaluate()
+    assert eng.ups_rt["u"].triggered
+    assert "charge 20%" in eng.ups_rt["u"].trigger_reason
+
+    # Snapshot tells the UI which source this is, and mains return clears the trigger.
+    assert eng.snapshot()["ups"][0]["type"] == "nut"
+    eng.ups_rt["u"].state = UpsState(reachable=True, power_source="mains",
+                                     battery_charge_pct=90)
+    await eng._evaluate()
+    assert not eng.ups_rt["u"].triggered
+
+
+@pytest.mark.asyncio
+async def test_unreachable_nut_source_alarms_but_never_shuts_down():
+    """Fail safe is a property of the engine, so it holds for every source type."""
+    cfg = AppConfig(
+        ups=[NutConfig(id="u", name="USB UPS", host="127.0.0.1", ups_name="ups")],
+        hosts=[HostConfig(name="pve01", api_url="https://x:8006", ups_ids=["u"])],
+        thresholds=Thresholds(unreachable_alarm_after_polls=1),
+        dry_run=False,
+    )
+    eng = Engine(cfg)
+    eng.ups_rt["u"].state = UpsState(reachable=False, error="upsd has stale data")
+    await eng._evaluate()
+    assert eng.ups_rt["u"].alarm_active
+    assert not eng.ups_rt["u"].triggered
+    assert not eng.shutdown_triggered
 
 
 # --- multi-UPS host policy (AND/OR) -----------------------------------------
@@ -1074,8 +1190,8 @@ def test_probe_summary_flags_the_snmpv1_multi_get_trap():
 
 
 @pytest.mark.asyncio
-async def test_api_test_snmp_returns_probe_details_without_secrets(monkeypatch):
-    """The test endpoint carries the per-OID diagnosis and never echoes credentials."""
+async def test_api_test_ups_returns_probe_details_without_secrets(monkeypatch):
+    """The test endpoint carries the per-object diagnosis and never echoes credentials."""
     import json
 
     from app import main, ups
@@ -1099,20 +1215,54 @@ async def test_api_test_snmp_returns_probe_details_without_secrets(monkeypatch):
                 raw="3",
             )
         ]
+        result.missing_triggers = ["runtime"]
         return result
 
-    monkeypatch.setattr(main.ups, "poll", fake_poll)
-    monkeypatch.setattr(main.ups, "probe", fake_probe)
+    monkeypatch.setattr(main.sources, "poll", fake_poll)
+    monkeypatch.setattr(main.sources, "probe", fake_probe)
 
     # Masked community -> reconciled from the stored UPS, so the stored secret is in play.
-    body = await main.api_test_snmp(
+    body = await main.api_test_ups(
         {"id": "u1", "host": "10.0.0.5", "community": main.SECRET_PLACEHOLDER}
     )
 
     assert body["reachable"] is True
     assert body["probe"]["entries"][0]["name"] == "upsOutputSource"
     assert body["probe"]["ok_count"] == 1
+    assert body["probe"]["missing_triggers"] == ["runtime"]
     assert "s3cr3t" not in json.dumps(body)
+
+    # /api/test/snmp stays as a 3.1.x-compatible alias for the same behaviour.
+    legacy = await main.api_test_snmp({"id": "u1", "host": "10.0.0.5"})
+    assert legacy["reachable"] is True
+
+
+@pytest.mark.asyncio
+async def test_api_test_ups_dispatches_on_the_source_type(monkeypatch):
+    """A NUT entry must be validated as NutConfig, not silently as an SNMP one."""
+    from app import main
+
+    monkeypatch.setattr(main, "engine", Engine(AppConfig()))
+    seen = {}
+
+    async def fake_poll(cfg):
+        seen["cls"] = type(cfg).__name__
+        seen["ups_name"] = getattr(cfg, "ups_name", None)
+        return UpsState(reachable=True, power_source="battery", battery_status="normal")
+
+    async def fake_probe(_cfg):
+        from app import ups as ups_mod
+
+        return ups_mod.ProbeResult(reachable=True, summary="ok", ok_count=5, total=5)
+
+    monkeypatch.setattr(main.sources, "poll", fake_poll)
+    monkeypatch.setattr(main.sources, "probe", fake_probe)
+
+    body = await main.api_test_ups(
+        {"id": "n1", "type": "nut", "host": "10.0.0.7", "port": 3493, "ups_name": "myups"}
+    )
+    assert seen == {"cls": "NutConfig", "ups_name": "myups"}
+    assert body["power_source"] == "battery"
 
 
 # --- self-test schedule (v3.1.0) -------------------------------------------

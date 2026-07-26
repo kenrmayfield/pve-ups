@@ -28,16 +28,18 @@ from pydantic import BaseModel
 
 from . import __version__, db
 from .config import (
+    UPS_SOURCE_MODELS,
     AppConfig,
     HostConfig,
     SnmpConfig,
+    UpsBase,
     _to_serialisable,
     assign_ups_ids,
     load_config,
     save_config,
 )
 from .engine import Engine
-from . import proxmox, ups
+from . import proxmox, sources
 
 log = logging.getLogger("pve-usv")
 
@@ -334,11 +336,23 @@ def _reconcile_secret(incoming, existing: str) -> str:
     return incoming
 
 
-def _reconcile_ups_secrets(ups_entry: dict, old: Optional[SnmpConfig]) -> None:
-    """Carry over unchanged (masked) per-UPS secrets, in place."""
-    defaults = {"community": "public", "v3_auth_pass": "", "v3_priv_pass": ""}
-    for fld, default in defaults.items():
-        old_secret = getattr(old, fld).get_secret_value() if old else default
+def _ups_model(ups_entry: dict) -> type[UpsBase]:
+    """Model class for a submitted UPS entry; unknown/absent type means the legacy SNMP one."""
+    return UPS_SOURCE_MODELS.get(str(ups_entry.get("type") or "snmp"), SnmpConfig)
+
+
+def _reconcile_ups_secrets(ups_entry: dict, old: Optional[UpsBase]) -> None:
+    """Carry over unchanged (masked) per-UPS secrets, in place.
+
+    Which fields those are comes from the source model itself, so a new source type only
+    has to declare ``secret_fields()`` to be handled correctly here.
+    """
+    model = _ups_model(ups_entry)
+    for fld, default in model.secret_fields().items():
+        # Only reuse the stored secret when the entry still is the same source type —
+        # switching a UPS from SNMP to NUT must not inherit anything.
+        keep = old is not None and isinstance(old, model)
+        old_secret = getattr(old, fld).get_secret_value() if keep else default
         ups_entry[fld] = _reconcile_secret(ups_entry.get(fld), old_secret)
 
 
@@ -346,7 +360,7 @@ def _merge_config(incoming: dict, existing: AppConfig) -> AppConfig:
     """Build a new config, carrying over unchanged (masked) secrets."""
     data = dict(incoming)
 
-    # Per-UPS SNMP secrets, matched by stable UPS id.
+    # Per-UPS secrets, matched by stable UPS id.
     existing_ups = {u.id: u for u in existing.ups}
     for ups_entry in data.get("ups", []) or []:
         _reconcile_ups_secrets(ups_entry, existing_ups.get(ups_entry.get("id")))
@@ -410,8 +424,8 @@ def _exportable_config(cfg: AppConfig) -> dict:
 async def api_config_export():
     assert engine is not None
     data = _exportable_config(engine.cfg)
-    first_ups = engine.cfg.ups[0].host if engine.cfg.ups else ""
-    host = first_ups or "appliance"
+    first_ups = engine.cfg.ups[0].label if engine.cfg.ups else ""
+    host = re.sub(r"[^A-Za-z0-9._-]+", "-", first_ups).strip("-") or "appliance"
     stamp = datetime.now().strftime("%Y%m%d")
     filename = f"pve-usv-config-{host}-{stamp}.json"
     db.log_event("Configuration exported", "Backup including secrets downloaded.", db.INFO)
@@ -447,21 +461,25 @@ async def api_config_import(incoming: dict):
 
 
 # --- tests / actions (authenticated) ---------------------------------------
-@app.post("/api/test/snmp", dependencies=[Depends(require_auth)])
-async def api_test_snmp(incoming: dict):
-    """One-shot SNMP poll with the submitted settings (secrets reconciled by UPS id).
+@app.post("/api/test/ups", dependencies=[Depends(require_auth)])
+async def api_test_ups(incoming: dict):
+    """One-shot poll of the submitted UPS settings (secrets reconciled by UPS id).
 
     Runs the production poll *and* a per-object probe: the poll proves the path the engine
-    actually uses works (its single multi-object GET can fail under SNMPv1 even when every
-    object is readable on its own), the probe says which object is to blame.
+    actually uses works (an SNMPv1 multi-object GET can fail even when every object is
+    readable on its own), the probe says which object is to blame and which triggers the
+    device cannot feed at all.
     """
     assert engine is not None
     incoming = dict(incoming)
     existing_ups = {u.id: u for u in engine.cfg.ups}
     _reconcile_ups_secrets(incoming, existing_ups.get(incoming.get("id")))
-    cfg = SnmpConfig.model_validate(incoming)
-    state = await ups.poll(cfg)
-    diag = await ups.probe(cfg)
+    try:
+        cfg = _ups_model(incoming).model_validate(incoming)
+    except Exception as exc:  # noqa: BLE001 - validation error -> 400
+        raise HTTPException(status_code=400, detail=f"Invalid UPS settings: {exc}")
+    state = await sources.poll(cfg)
+    diag = await sources.probe(cfg)
     return {
         "reachable": state.reachable,
         "power_source": state.power_source,
@@ -477,8 +495,15 @@ async def api_test_snmp(incoming: dict):
             "ok_count": diag.ok_count,
             "total": diag.total,
             "entries": [asdict(e) for e in diag.entries],
+            "missing_triggers": diag.missing_triggers,
         },
     }
+
+
+@app.post("/api/test/snmp", dependencies=[Depends(require_auth)])
+async def api_test_snmp(incoming: dict):
+    """Kept for compatibility with 3.1.x; /api/test/ups supersedes it."""
+    return await api_test_ups(incoming)
 
 
 @app.post("/api/test/host", dependencies=[Depends(require_auth)])

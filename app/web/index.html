@@ -165,10 +165,11 @@
       </div>
 
       <div class="card">
-        <div class="card-h"><h3><span class="section-num">1</span> <svg class="icon"><use href="#i-battery"></use></svg> <span data-i18n="wiz.ups">UPS devices (SNMP)</span></h3>
-          <a class="doclink" href="/manual.html#snmp" data-manual="snmp" target="_blank" rel="noopener" title="Read in the manual: SNMP on the UPS" data-i18n-title="wiz.upsDoc"><svg class="icon"><use href="#i-help"></use></svg></a></div>
-        <p class="help" data-i18n="wiz.upsHelp">Monitor one or more UPS devices via SNMP. For servers with redundant
-          power supplies use one UPS per feed — the mapping is done in step 2.
+        <div class="card-h"><h3><span class="section-num">1</span> <svg class="icon"><use href="#i-battery"></use></svg> <span data-i18n="wiz.ups">UPS devices</span></h3>
+          <a class="doclink" href="/manual.html#snmp" data-manual="snmp" target="_blank" rel="noopener" title="Read in the manual: UPS sources" data-i18n-title="wiz.upsDoc"><svg class="icon"><use href="#i-help"></use></svg></a></div>
+        <p class="help" data-i18n="wiz.upsHelp">Monitor one or more UPS devices — via SNMP (UPS with its own
+          network card) or via a NUT server, which is how USB and serial UPS devices are read. For servers
+          with redundant power supplies use one UPS per feed — the mapping is done in step 2.
           Optional per-UPS thresholds override the global values from step 3.</p>
         <div id="upsList"></div>
         <div class="row" style="margin-top:12px;align-items:center">

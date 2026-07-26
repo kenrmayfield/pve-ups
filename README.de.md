@@ -1,22 +1,24 @@
 # PVE-UPS
 
-**GUI-basierte USV-Shutdown-Appliance für Proxmox VE — eine NUT-Alternative mit
-Web-Wizard und ohne Konfigurationsdateien.**
+**GUI-basierte USV-Shutdown-Appliance für Proxmox VE — mit Web-Wizard und ohne
+Konfigurationsdateien.**
 
 *English version: [README.md](README.md)*
 
-PVE-UPS überwacht eine oder mehrere **USVs mit SNMP-Netzwerkkarte (Standard RFC 1628)**
-und fährt bei Stromausfall einen oder mehrere **Standalone-Proxmox-VE-Hosts** geordnet
-herunter — der moderne Ersatz für herstellergebundene Appliances wie APC PowerChute
-Network Shutdown. Die komplette Einrichtung läuft über einen **Web-Wizard**; Monitoring
-gibt es als **REST/JSON**.
+PVE-UPS überwacht eine oder mehrere USVs — **mit SNMP-Netzwerkkarte (Standard RFC 1628)**
+oder **über einen NUT-Server**, worüber USB- und seriell angeschlossene USVs gelesen
+werden — und fährt bei Stromausfall einen oder mehrere **Standalone-Proxmox-VE-Hosts**
+geordnet herunter. Der moderne Ersatz für herstellergebundene Appliances wie APC
+PowerChute Network Shutdown. Die komplette Einrichtung läuft über einen **Web-Wizard**;
+Monitoring gibt es als **REST/JSON**.
 
 ## Warum nicht NUT?
 
-[NUT](https://networkupstools.org/) ist mächtig, bedeutet für den üblichen Fall „fahre
-meine Proxmox-Hosts herunter, wenn die USV zur Neige geht" aber Treiber-Zuordnung,
+[NUT](https://networkupstools.org/) hat hervorragende Hardware-Unterstützung, bedeutet für
+den üblichen Fall „fahre meine Proxmox-Hosts herunter, wenn die USV zur Neige geht" aber
 `upsd`-/`upsmon`-Konfigdateien und eigene Shutdown-Skripte auf jedem Host. PVE-UPS geht
-stattdessen den Appliance-Weg:
+stattdessen den Appliance-Weg — und wo man NUTs Hardware-Unterstützung braucht, nutzt es
+NUT als *Treiber*, statt es zu ersetzen:
 
 - **Ein LXC, ein Installer** — ein unprivilegierter Debian-Container (~256 MB RAM),
   angelegt mit einem einzigen Befehl auf dem PVE-Host.
@@ -25,8 +27,12 @@ stattdessen den Appliance-Weg:
 - **Keine Agenten auf den Hosts** — der Shutdown läuft über die Proxmox-API mit einem
   dedizierten, widerrufbaren **API-Token**, das nur das Recht `Sys.PowerMgmt` besitzt.
   Nirgendwo Root-SSH.
-- **Herstellerneutral** — liest ausschließlich die Standard-RFC-1628-UPS-MIB per
-  SNMP v1/v2c/v3 (reine Python-Implementierung, kein net-snmp).
+- **Herstellerneutral** — die Standard-RFC-1628-UPS-MIB per SNMP v1/v2c/v3 (reine
+  Python-Implementierung, kein net-snmp) oder jeder vorhandene NUT-Server als
+  nur-lesender Client.
+- **NUT bleibt Treiber, nie das Gehirn** — PVE-UPS liest von `upsd` ausschließlich
+  Variablen. Kein `upsmon`, kein `upssched`, keine Shutdown-Skripte: Schwellen,
+  Host-Logik und Entscheidung bleiben in der Appliance, wo man sie sieht.
 
 ## Screenshots
 
@@ -148,10 +154,16 @@ UUID, wird nur dieses eine Mal angezeigt — jetzt kopieren). Beides im Wizard u
 
 - **Mehrere USVs** pro Instanz mit Host↔USV-Zuordnung und Logik pro Host
   (**UND** = redundante Netzteile, **ODER** = aufgeteilte Last), inkl. Live-Schaubild.
-- **SNMP v1/v2c und v3** (authPriv), RFC-1628-UPS-MIB, nur lesend.
+- **Zwei USV-Quellen**, in einer Instanz frei mischbar:
+  - **SNMP v1/v2c und v3** (authPriv), RFC-1628-UPS-MIB, nur lesend.
+  - **NUT-Server** (TCP 3493) als nur-lesender Client — für USVs ohne Netzwerkkarte.
+    Funktioniert mit dem eingebauten USV-Server einer Synology/QNAP/TrueNAS, einem
+    Raspberry Pi, OPNsense oder einem NUT auf einem Proxmox-Host.
 - **Web-Wizard** für USVs, Hosts, Schwellwerte und Benachrichtigungen — mit Test-Buttons;
-  der SNMP-Test schlüsselt sein Ergebnis je RFC-1628-Objekt auf, sodass fehlende OID,
-  falsche Zugangsdaten und blockierter Port auf einen Blick unterscheidbar sind.
+  der USV-Test schlüsselt sein Ergebnis je Objekt auf, sodass fehlende OID bzw.
+  NUT-Variable, falsche Zugangsdaten und blockierter Port auf einen Blick unterscheidbar
+  sind. Er benennt außerdem die Auslöser, die das Gerät gar nicht bedienen kann — so
+  bleibt keine Schwelle stillschweigend wirkungslos.
 - **Zweisprachige Oberfläche**: Englisch (Standard) und Deutsch, automatisch passend
   zur Browsersprache; eingebautes Benutzerhandbuch (beide Sprachen).
 - **Schwellen-Overrides je USV** zusätzlich zu den globalen Standardwerten.
@@ -166,8 +178,10 @@ UUID, wird nur dieses eine Mal angezeigt — jetzt kopieren). Beides im Wizard u
 
 ## Sicherheitsmodell
 
-- **Fail-safe als Standard:** ein SNMP-Verbindungsverlust ist *kein* bestätigter
-  Stromausfall — er löst Alarm aus und fährt nie etwas herunter. Zwei explizite Opt-ins
+- **Fail-safe als Standard:** ein Kontaktverlust zur USV ist *kein* bestätigter
+  Stromausfall — er löst Alarm aus und fährt nie etwas herunter. Das gilt genauso für
+  einen NUT-Server, der wegen eines abgestürzten Treibers veraltete Daten liefert: das
+  zählt als nicht erreichbar, nie als „Netzbetrieb". Zwei explizite Opt-ins
   verfeinern das: einen bestätigten Akkubetrieb-Countdown über den Verbindungsverlust
   hinweg fortsetzen (Standard an) und einen anhaltenden reinen Kommunikationsverlust doch
   als Ausfall behandeln (Standard aus).
@@ -214,18 +228,27 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 pytest                       # Unit-Tests, keine Hardware nötig
 
-# USV simulieren (separates Terminal); Snapshots unter ./snmpdata/:
+# SNMP-USV simulieren (separates Terminal); Snapshots unter ./snmpdata/:
 snmpsim-command-responder --data-dir=./snmpdata --agent-udpv4-endpoint=127.0.0.1:1161
+
+# ... oder einen NUT-Server simulieren:
+python -m tests.nutsim --port 3493 --scenario battery   # mains | battery | low | sparse
+
 PVE_USV_CONFIG=./dev-config.yaml PVE_USV_DB=./dev-events.db python -m app.main
-# UI: http://127.0.0.1:8080 — SNMP-Host 127.0.0.1, Port 1161,
-#   Community "public"  -> Netzbetrieb (100 %)
-#   Community "battery" -> Stromausfall (Akku, 22 %, 3 min) -> Auslöser greifen
+# UI: http://127.0.0.1:8080
+#   SNMP: Host 127.0.0.1, Port 1161, Community "public"  -> Netzbetrieb (100 %)
+#                                    Community "battery" -> Stromausfall -> Auslöser greifen
+#   NUT:  Host 127.0.0.1, Port 3493, USV-Name "ups"
 ```
 
 ## Grenzen / Annahmen
 
 - Nur Standalone-Hosts (kein Cluster-/HA-Manager-Eingriff) — mögliche spätere Erweiterung.
-- Liest ausschließlich die Standard-RFC-1628-UPS-MIB (herstellerunabhängig).
+- Liest entweder die Standard-RFC-1628-UPS-MIB oder die Variablen eines NUT-Servers —
+  beides herstellerunabhängig. Die Appliance selbst spricht kein USB/seriell; eine lokal
+  angeschlossene USV wird über einen NUT-Server erreicht.
+- Das NUT-Protokoll ist unverschlüsselt. Es gehört in ein vertrauenswürdiges Netz — oder
+  auf einen `upsd`, der nur auf dem Loopback-Interface derselben Maschine lauscht.
 - In der optionalen Docker-Bereitstellung sind In-App-Updates und NTP-/Zeitzonen-Verwaltung
   nicht verfügbar (siehe [Docker](#docker-alternative-bereitstellung)) — alles Weitere ist
   identisch.

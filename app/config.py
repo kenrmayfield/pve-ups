@@ -1,9 +1,8 @@
 """Configuration model and persistence.
 
 The entire appliance is configured through a *single* YAML file, written exclusively
-by the web UI. No hand-editing of multiple config files (that is the whole point of
-this project vs. NUT). Secrets live in the same file, which is created with 0600
-permissions.
+by the web UI. No hand-editing of config files anywhere — that is the whole point of
+this project. Secrets live in the same file, which is created with 0600 permissions.
 
 Copyright 2026 Florian Finder
 """
@@ -15,7 +14,7 @@ import secrets
 import re
 from enum import Enum
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional, Union
 
 import yaml
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
@@ -27,6 +26,17 @@ CONFIG_PATH = Path(os.environ.get("PVE_USV_CONFIG", "/etc/pve-usv/config.yaml"))
 # schedule forms an exact daily grid anchored at ``selftest_hour`` (see engine.selftest_slot).
 # The <select> in app/web/index.html must offer exactly these values.
 SELFTEST_INTERVALS = (15, 30, 60, 120, 180, 360, 720, 1440)
+
+
+class UpsSourceType(str, Enum):
+    """How a UPS is read. The value is the ``type`` discriminator in the config.
+
+    Every member needs a matching ``src.<value>`` i18n key in en.js *and* de.js
+    (enforced by tests/test_i18n.py).
+    """
+
+    snmp = "snmp"  # UPS with an SNMP network card, RFC 1628
+    nut = "nut"  # any Network UPS Tools server (upsd) over TCP
 
 
 class SnmpVersion(str, Enum):
@@ -66,11 +76,45 @@ class UpsThresholdOverride(BaseModel):
     keep_shutdown_on_comm_loss: Optional[bool] = None
 
 
-class SnmpConfig(BaseModel):
+class UpsBase(BaseModel):
+    """Fields every UPS source shares, regardless of how it is read.
+
+    The engine, the thresholds and the host↔UPS mapping only ever touch these — a new
+    source type therefore inherits the whole trigger/policy/fail-safe machinery.
+    """
+
     # Identity (multi-UPS): ``id`` is a stable slug referenced by hosts, ``name`` is the
     # human label shown in the UI. ``id`` is auto-filled on save if left empty.
     id: str = ""
     name: str = ""
+
+    # Optional per-UPS threshold override (None fields inherit the global thresholds).
+    overrides: UpsThresholdOverride = UpsThresholdOverride()
+
+    @property
+    def configured(self) -> bool:
+        """True once the source has enough information to be polled."""
+        return False
+
+    @property
+    def label(self) -> str:
+        """Display label, falling back to id and a per-type hint when no name is set."""
+        return self.name or self.id or self._fallback_label() or "UPS"
+
+    def _fallback_label(self) -> str:
+        return ""
+
+    @classmethod
+    def secret_fields(cls) -> dict[str, str]:
+        """Secret field names -> default value, for the API's masked-secret reconcile."""
+        return {}
+
+
+class SnmpConfig(UpsBase):
+    # Plain string literal (not the enum) so a YAML/JSON "snmp" validates directly and
+    # round-trips through yaml.safe_dump untouched. UpsSourceType stays the single list
+    # of valid values; tests/test_i18n.py keeps both in sync.
+    type: Literal["snmp"] = "snmp"
 
     host: str = ""
     port: int = 161
@@ -88,17 +132,56 @@ class SnmpConfig(BaseModel):
     v3_priv_proto: SnmpPrivProto = SnmpPrivProto.aes
     v3_priv_pass: SecretStr = SecretStr("")
 
-    # Optional per-UPS threshold override (None fields inherit the global thresholds).
-    overrides: UpsThresholdOverride = UpsThresholdOverride()
-
     @property
     def configured(self) -> bool:
         return bool(self.host)
 
+    def _fallback_label(self) -> str:
+        return self.host
+
+    @classmethod
+    def secret_fields(cls) -> dict[str, str]:
+        return {"community": "public", "v3_auth_pass": "", "v3_priv_pass": ""}
+
+
+class NutConfig(UpsBase):
+    """A UPS read from a Network UPS Tools server (``upsd``) over TCP.
+
+    We are a read-only client: PVE-UPS never runs ``upsmon`` and never hands the
+    shutdown decision to NUT. Any existing upsd works — a NAS with its built-in UPS
+    server, a Raspberry Pi, or the driver bundled with this appliance.
+    """
+
+    type: Literal["nut"] = "nut"
+
+    host: str = ""  # upsd host (127.0.0.1 for a locally attached UPS)
+    port: int = 3493
+    ups_name: str = ""  # section name in upsd's ups.conf, e.g. "ups"
+    # Credentials are optional: reading variables is anonymous on a default upsd.
+    username: str = ""
+    password: SecretStr = SecretStr("")
+    timeout_s: float = 3.0
+
     @property
-    def label(self) -> str:
-        """Display label, falling back to id/host when no name is set."""
-        return self.name or self.id or self.host or "UPS"
+    def configured(self) -> bool:
+        return bool(self.host and self.ups_name)
+
+    def _fallback_label(self) -> str:
+        return f"{self.ups_name}@{self.host}" if self.host else self.ups_name
+
+    @classmethod
+    def secret_fields(cls) -> dict[str, str]:
+        return {"password": ""}
+
+
+# Discriminated union of every supported source. Adding a type means: a model here, a
+# branch in app/sources.py, an entry in UpsSourceType and the matching i18n keys.
+UpsSource = Annotated[Union[SnmpConfig, NutConfig], Field(discriminator="type")]
+
+UPS_SOURCE_MODELS: dict[str, type[UpsBase]] = {
+    "snmp": SnmpConfig,
+    "nut": NutConfig,
+}
 
 
 class ShutdownMethod(str, Enum):
@@ -117,7 +200,7 @@ class HostConfig(BaseModel):
     order: int = 0  # ascending; this_host is forced last regardless
     enabled: bool = True
 
-    # Multi-UPS: which UPS devices feed this host (by SnmpConfig.id). Empty = depends
+    # Multi-UPS: which UPS devices feed this host (by UPS id). Empty = depends
     # on ALL configured UPS (conservative fallback). ``ups_policy`` decides how the
     # feeds combine: "all" = shut down only when every feed has triggered (redundant
     # PSUs, default), "any" = shut down as soon as one feed triggers (split, non-
@@ -177,7 +260,7 @@ class AppConfig(BaseModel):
     # Master safety switch: when True the engine only logs, never shuts anything down.
     dry_run: bool = True
 
-    ups: list[SnmpConfig] = Field(default_factory=list)
+    ups: list[UpsSource] = Field(default_factory=list)
     hosts: list[HostConfig] = Field(default_factory=list)
     thresholds: Thresholds = Thresholds()
     notifications: Notifications = Notifications()
@@ -203,12 +286,17 @@ class AppConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _migrate_single_snmp(cls, data):
-        """Migrate the pre-2.0 single-UPS schema (``snmp: {...}``) to ``ups: [...]``.
+    def _migrate_ups_list(cls, data):
+        """Bring older UPS schemas up to the current ``ups: [{type: ..., ...}]`` shape.
 
-        Old config files have one ``snmp`` block and hosts without ``ups_ids``. We wrap
-        that block into a single UPS ``id="ups1"`` and point every host at it, so an
-        existing ``config.yaml`` keeps working unchanged across the 2.0 upgrade.
+        Two steps, both required for an existing ``config.yaml`` to keep working:
+
+        * pre-2.0 had a single ``snmp: {...}`` block and hosts without ``ups_ids`` — it
+          is wrapped into one UPS ``id="ups1"`` that every host is pointed at;
+        * pre-3.2 UPS entries have no ``type`` at all, and the discriminated union would
+          reject them. SNMP was the only source back then, so that is the default.
+
+        An import must never be refused (same rule as the self-test validators below).
         """
         if not isinstance(data, dict):
             return data
@@ -224,6 +312,11 @@ class AppConfig(BaseModel):
                 for host in data.get("hosts", []) or []:
                     if isinstance(host, dict) and not host.get("ups_ids"):
                         host["ups_ids"] = ["ups1"]
+        ups = data.get("ups")
+        if isinstance(ups, list):
+            data["ups"] = [
+                {**u, "type": u.get("type") or "snmp"} if isinstance(u, dict) else u for u in ups
+            ]
         return data
 
     @field_validator("selftest_interval_min", mode="before")
@@ -249,7 +342,7 @@ class AppConfig(BaseModel):
         except (TypeError, ValueError):
             return 9
 
-    def effective_thresholds(self, ups: SnmpConfig) -> Thresholds:
+    def effective_thresholds(self, ups: UpsBase) -> Thresholds:
         """Global thresholds with this UPS's non-None overrides applied."""
         ov = ups.overrides
         merged = self.thresholds.model_copy()
@@ -266,7 +359,7 @@ class AppConfig(BaseModel):
                 setattr(merged, field, val)
         return merged
 
-    def ups_by_id(self, ups_id: str) -> Optional[SnmpConfig]:
+    def ups_by_id(self, ups_id: str) -> Optional[UpsBase]:
         for u in self.ups:
             if u.id == ups_id:
                 return u
@@ -289,7 +382,7 @@ def _slugify(text: str) -> str:
     return slug or "ups"
 
 
-def assign_ups_ids(ups: list[SnmpConfig]) -> None:
+def assign_ups_ids(ups: list[UpsBase]) -> None:
     """Fill empty UPS ids with stable, collision-free slugs (in place)."""
     taken = {u.id for u in ups if u.id}
     for i, u in enumerate(ups, start=1):

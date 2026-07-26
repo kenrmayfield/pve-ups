@@ -8,7 +8,7 @@ A host is shut down based on *its* feeding UPS devices (``HostConfig.ups_ids``) 
 its policy (``ups_policy``): ``"all"`` (redundant PSUs — shut down only when every
 feed has triggered, the default) or ``"any"`` (shut down as soon as one feed
 triggers). A return to mains on any required feed aborts a not-yet-committed shutdown
-(hysteresis, no flapping). SNMP unreachability raises an alarm but never triggers a
+(hysteresis, no flapping). An unreachable UPS raises an alarm but never triggers a
 shutdown on its own (fail safe); a trigger already fired on fresh data, however, stays
 latched while the UPS is unreachable (blind = never downgrade). When ``dry_run`` is set, the engine logs what it
 *would* do and latches per host until power returns, instead of actually shutting
@@ -28,8 +28,9 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from . import __version__, db, notify, proxmox
-from .config import AppConfig, HostConfig, SnmpConfig
-from .ups import UpsState, poll
+from .config import AppConfig, HostConfig, UpsBase
+from .sources import poll
+from .ups import UpsState
 
 log = logging.getLogger("pve-usv.engine")
 
@@ -39,7 +40,7 @@ SHUTDOWN_PENDING = "SHUTDOWN_PENDING"
 SHUTTING_DOWN = "SHUTTING_DOWN"
 
 # Per-UPS battery timers survive a service restart via this file (next to events.db).
-# Without it, a restart during a "blind" outage (on battery, then SNMP lost) would drop
+# Without it, a restart during a "blind" outage (on battery, then contact lost) would drop
 # the running countdown and never shut down — even though the outage was confirmed.
 STATE_PATH = db.DB_PATH.parent / "engine-state.json"
 STATE_RESTORE_MAX_AGE_H = 24  # discard persisted timers older than this
@@ -81,7 +82,7 @@ def selftest_slot(now_local: datetime, hour: int, interval_min: int) -> datetime
 
 @dataclass
 class _UpsRuntime:
-    """Per-UPS runtime state (one instance per configured UPS, keyed by ``SnmpConfig.id``)."""
+    """Per-UPS runtime state (one instance per configured UPS, keyed by the UPS id)."""
 
     state: UpsState = field(default_factory=UpsState)
     on_battery_since: Optional[datetime] = None
@@ -100,7 +101,7 @@ class Engine:
         self.started_at = _now()
         self.state = ONLINE
 
-        # Per-UPS runtime, keyed by SnmpConfig.id.
+        # Per-UPS runtime, keyed by the UPS id.
         self.ups_rt: dict[str, _UpsRuntime] = {}
         self._sync_runtimes()
 
@@ -351,7 +352,7 @@ class Engine:
         self._recompute_state()
         self._persist_state()
 
-    async def _evaluate_ups(self, u: SnmpConfig, rt: _UpsRuntime) -> None:
+    async def _evaluate_ups(self, u: UpsBase, rt: _UpsRuntime) -> None:
         """Per-UPS state machine: connectivity logging, fail-safe alarm, battery timer,
         and the resulting ``rt.triggered`` / ``rt.trigger_reason``."""
         th = self.cfg.effective_thresholds(u)
@@ -363,13 +364,13 @@ class Engine:
             if st.reachable:
                 await self._emit(
                     f"{name}: network connection restored",
-                    "SNMP response received.",
+                    "The UPS is answering again.",
                     db.INFO,
                 )
             else:
                 await self._emit(
                     f"{name}: network connection lost",
-                    f"No SNMP response ({st.error or 'timeout'}).",
+                    f"No response from the UPS ({st.error or 'timeout'}).",
                     db.WARNING,
                 )
         rt.last_reachable = st.reachable
@@ -401,7 +402,7 @@ class Engine:
                 if rt.triggered:
                     await self._emit(
                         f"{name} unreachable — trigger stays latched",
-                        f"No SNMP response for {rt.unreachable_count} polls "
+                        f"No response for {rt.unreachable_count} polls "
                         f"({st.error or 'timeout'}). The already fired trigger persists: "
                         f"{rt.trigger_reason}.",
                         db.WARNING,
@@ -410,7 +411,7 @@ class Engine:
                     remaining = self._ups_countdown_remaining_s(u, rt)
                     await self._emit(
                         f"{name} unreachable — on-battery countdown continues",
-                        f"No SNMP response for {rt.unreachable_count} polls "
+                        f"No response for {rt.unreachable_count} polls "
                         f"({st.error or 'timeout'}). The on-battery countdown keeps running "
                         f"on the local clock — shutdown when it expires"
                         + (f" (~{remaining} s)." if remaining is not None else "."),
@@ -419,7 +420,7 @@ class Engine:
                 elif th.comm_loss_shutdown_after_min is not None:
                     await self._emit(
                         f"{name} unreachable — shutdown on prolonged loss",
-                        f"No SNMP response for {rt.unreachable_count} polls "
+                        f"No response for {rt.unreachable_count} polls "
                         f"({st.error or 'timeout'}). No power outage confirmed, but if the "
                         f"communication loss persists, a shutdown will be triggered after "
                         f"{th.comm_loss_shutdown_after_min} min.",
@@ -428,7 +429,7 @@ class Engine:
                 else:
                     await self._emit(
                         f"{name} unreachable",
-                        f"No SNMP response for {rt.unreachable_count} polls "
+                        f"No response for {rt.unreachable_count} polls "
                         f"({st.error or 'timeout'}). NO shutdown will be triggered.",
                         db.WARNING,
                     )
@@ -547,7 +548,7 @@ class Engine:
             return int((_now() - rt.on_battery_since).total_seconds())
         return None
 
-    def _ups_trigger_reason(self, u: SnmpConfig, rt: _UpsRuntime) -> Optional[str]:
+    def _ups_trigger_reason(self, u: UpsBase, rt: _UpsRuntime) -> Optional[str]:
         """Whether (and why) a single UPS currently demands a shutdown.
 
         These thresholds must never fire on mains, so a UPS recharging after an outage is
@@ -569,7 +570,7 @@ class Engine:
             elapsed_min = (_now() - rt.unreachable_since).total_seconds() / 60
             if elapsed_min >= th.comm_loss_shutdown_after_min:
                 return (
-                    f"SNMP communication lost for ~{int(elapsed_min)} min "
+                    f"communication lost for ~{int(elapsed_min)} min "
                     f"(threshold {th.comm_loss_shutdown_after_min} min)"
                 )
 
@@ -586,7 +587,7 @@ class Engine:
             if elapsed is not None and elapsed >= th.on_battery_seconds:
                 return (
                     f"on battery for {elapsed} s ≥ {th.on_battery_seconds} s "
-                    f"(SNMP lost while on battery, countdown kept running)"
+                    f"(contact lost while on battery, countdown kept running)"
                 )
             return None
 
@@ -611,7 +612,7 @@ class Engine:
 
         return None
 
-    def _ups_countdown_remaining_s(self, u: SnmpConfig, rt: _UpsRuntime) -> Optional[int]:
+    def _ups_countdown_remaining_s(self, u: UpsBase, rt: _UpsRuntime) -> Optional[int]:
         th = self.cfg.effective_thresholds(u)
         # Once this UPS has triggered (battery low, charge/runtime threshold, ...), the
         # time-based countdown is moot — hiding it keeps the UI from suggesting the
@@ -627,7 +628,7 @@ class Engine:
             return None
         return max(0, th.on_battery_seconds - elapsed)
 
-    def _ups_comm_loss_remaining_s(self, u: SnmpConfig, rt: _UpsRuntime) -> Optional[int]:
+    def _ups_comm_loss_remaining_s(self, u: UpsBase, rt: _UpsRuntime) -> Optional[int]:
         """Seconds until the opt-in *pure* comms-loss shutdown fires for this UPS, or None."""
         th = self.cfg.effective_thresholds(u)
         if th.comm_loss_shutdown_after_min is None or rt.comm_loss_fired:
@@ -794,12 +795,13 @@ class Engine:
         await notify.notify(self.cfg.notifications, f"[PVE-UPS] {subject}", body, self.snapshot())
 
     # -- status snapshot for the REST API -----------------------------------
-    def _ups_snapshot(self, u: SnmpConfig, rt: _UpsRuntime) -> dict:
+    def _ups_snapshot(self, u: UpsBase, rt: _UpsRuntime) -> dict:
         st = rt.state
         th = self.cfg.effective_thresholds(u)
         return {
             "id": u.id,
             "name": u.label,
+            "type": getattr(u, "type", "snmp"),
             "reachable": st.reachable,
             "manufacturer": st.manufacturer,
             "model": st.model,

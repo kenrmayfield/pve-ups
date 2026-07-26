@@ -167,7 +167,7 @@
   <header class="topbar">
     <span class="brand">
       <svg class="mark icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5v6c0 5 3.4 8.5 8 11 4.6-2.5 8-6 8-11V5l-8-3z"/></svg>
-      PVE-UPS <span class="sub">Benutzerhandbuch · v3.1.0</span>
+      PVE-UPS <span class="sub">Benutzerhandbuch · v3.2.0</span>
     </span>
     <span class="spacer"></span>
     <a class="btn" href="https://github.com/ffind-dev/pve-ups" target="_blank"
@@ -189,7 +189,7 @@
         <li><a href="#voraussetzungen">Voraussetzungen</a></li>
         <li><a href="#installation">Installation &amp; Einrichtung</a></li>
         <li><a href="#token">Proxmox API-Token</a></li>
-        <li><a href="#snmp">SNMP an der USV</a></li>
+        <li><a href="#snmp">USV-Quellen</a></li>
         <li><a href="#logik">Funktion &amp; Logik</a></li>
         <li><a href="#failsafe">Fail-safe &amp; Sonderfälle</a></li>
         <li><a href="#ausloeser">Auslöser &amp; Schwellen</a></li>
@@ -204,10 +204,10 @@
       <div class="card intro">
         <h1>PVE-UPS — Benutzerhandbuch</h1>
         <p class="muted">Eine schlanke USV-Shutdown-Appliance für Proxmox VE: Sie überwacht
-        eine oder mehrere netzwerkfähige USVs per SNMP und fährt bei Stromausfall die
-        zugeordneten Proxmox-Hosts geordnet herunter — ganz ohne NUT und ohne von Hand
-        gepflegte Konfigurationsdateien. Dieses Handbuch richtet sich an technisch versierte
-        Administratoren, die das Produkt noch nicht kennen.</p>
+        eine oder mehrere USVs — per SNMP oder über einen NUT-Server — und fährt bei
+        Stromausfall die zugeordneten Proxmox-Hosts geordnet herunter, ohne irgendwo von
+        Hand gepflegte Konfigurationsdateien. Dieses Handbuch richtet sich an technisch
+        versierte Administratoren, die das Produkt noch nicht kennen.</p>
       </div>
 
       <section class="card" id="was">
@@ -218,8 +218,10 @@
         (~256&nbsp;MB RAM) und benötigt nur ein Installer-Skript.</p>
         <h3>Kernfunktionen</h3>
         <ul>
-          <li>Überwachung <b>einer oder mehrerer USVs</b> mit SNMP-Netzwerkkarte
-          (Standard RFC&nbsp;1628) per <b>SNMP v1/v2c/v3</b> — reine Python-Implementierung.</li>
+          <li>Überwachung <b>einer oder mehrerer USVs</b> — mit SNMP-Netzwerkkarte
+          (Standard RFC&nbsp;1628, <b>SNMP v1/v2c/v3</b>, reine Python-Implementierung) oder
+          über einen <b>NUT-Server</b>, worüber USB- und seriell angeschlossene USVs gelesen
+          werden.</li>
           <li>Geordneter Shutdown der Hosts über ein <b>Proxmox API-Token</b> (Recht
           <code>Sys.PowerMgmt</code>) — kein Root-SSH nötig.</li>
           <li><b>Host↔USV-Zuordnung</b> mit Logik pro Host (UND/ODER) für redundante
@@ -227,7 +229,7 @@
           <li>Komplette Einrichtung über einen <b>Web-Wizard</b> mit Test-Buttons.</li>
           <li>Weboberfläche auf <b>Englisch und Deutsch</b> — automatisch passend zur
           Browsersprache.</li>
-          <li><b>Fail-safe:</b> ein SNMP-Verbindungsverlust löst standardmäßig nur Alarm aus,
+          <li><b>Fail-safe:</b> ein Kontaktverlust zur USV löst standardmäßig nur Alarm aus,
           keinen Shutdown.</li>
           <li><b>Dry-Run-Modus</b> für eine gefahrlose Inbetriebnahme.</li>
           <li>Lesender <b>REST/JSON-Status</b> für Monitoring (<code>/api/status</code>,
@@ -240,10 +242,17 @@
         <ul>
           <li>Ein <b>Proxmox VE</b>-Host (Standalone — kein Cluster-/HA-Manager-Eingriff),
           auf dem der LXC laufen kann. Typischerweise einer der zu schützenden Hosts.</li>
-          <li>Eine oder mehrere <b>USVs mit SNMP-Netzwerkkarte</b>, die die Standard-<b>RFC-1628-UPS-MIB</b>
-          per SNMP bereitstellen (herstellerunabhängig).</li>
-          <li>Netzwerkverbindung zwischen Appliance und USV (SNMP, Lesezugriff genügt) sowie
-          zur Proxmox-API der zu schützenden Hosts (HTTPS, Port 8006).</li>
+          <li>Eine oder mehrere USVs, auf eine von zwei Arten erreichbar:
+            <ul>
+              <li>mit <b>SNMP-Netzwerkkarte</b>, die die Standard-<b>RFC-1628-UPS-MIB</b>
+              bereitstellt (herstellerunabhängig), oder</li>
+              <li>per <b>USB- oder seriellem Kabel</b> an einer Maschine, auf der ein
+              <b>NUT-Server</b> (<code>upsd</code>) läuft — siehe Abschnitt 5.</li>
+            </ul>
+          </li>
+          <li>Netzwerkverbindung zwischen Appliance und USV-Quelle (Lesezugriff genügt:
+          UDP 161 bei SNMP, TCP 3493 bei NUT) sowie zur Proxmox-API der zu schützenden Hosts
+          (HTTPS, Port 8006).</li>
         </ul>
       </section>
 
@@ -260,7 +269,8 @@ curl -fsSL https://github.com/ffind-dev/pve-ups/releases/latest/download/install
         öffnen und den Wizard durchlaufen:</p>
         <ol class="steps">
           <li>UI-Passwort setzen.</li>
-          <li><b>USVs</b> anlegen (SNMP-Adresse/Version) und je USV mit „SNMP testen" prüfen.</li>
+          <li><b>USVs</b> anlegen (Quelle, Adresse, Zugangsdaten — siehe Abschnitt 5) und je
+          USV mit „USV testen" prüfen.</li>
           <li><b>Proxmox-Hosts</b> eintragen (API-Token, siehe Abschnitt 4) und „Verbindung
           testen". Festlegen, welche USVs einen Host versorgen und nach welcher Logik
           (UND/ODER).</li>
@@ -292,29 +302,72 @@ pveum user token add ups@pve shutdown --privsep 0</code></pre>
       </section>
 
       <section class="card" id="snmp">
-        <h2 class="sec"><span class="n">5</span> SNMP an der USV</h2>
+        <h2 class="sec"><span class="n">5</span> USV-Quellen</h2>
+        <p>Jeder USV-Eintrag im Wizard hat eine Auswahl <b>„Gelesen über"</b>. Beide Quellen
+        lassen sich in einer Instanz frei mischen, und alles Weitere — Schwellwerte,
+        Host-Zuordnung, Fail-safe-Regeln — ist für beide identisch.</p>
+
+        <h3>SNMP (USV mit Netzwerkkarte)</h3>
         <p>In der Weboberfläche der USV-Netzwerkkarte (meist unter <i>Network → SNMPv1</i>
         bzw. <i>SNMPv3</i>) den Zugriff aktivieren und der Appliance-IP <b>Lesezugriff</b>
-        geben. Es wird nur die
-        Standard-RFC-1628-UPS-MIB gelesen (kein Schreibzugriff). Der Test im Wizard zeigt
-        sofort Quelle (Netz/Akku), Akkustatus, Restlaufzeit und Ladestand an.</p>
+        geben. Es wird nur die Standard-RFC-1628-UPS-MIB gelesen (kein Schreibzugriff).
+        Standardport 161/UDP.</p>
+
+        <h3>NUT-Server (USB- und serielle USVs)</h3>
+        <p>Eine USV ohne Netzwerkkarte wird über
+        <a href="https://networkupstools.org/" target="_blank" rel="noopener">Network UPS
+        Tools</a> erreicht: Auf der Maschine, an der die USV steckt, läuft <code>upsd</code>,
+        und PVE-UPS liest von dort über TCP&nbsp;3493. Häufig existiert so ein Server bereits
+        — Synology- und QNAP-NAS haben eine „USV-Server"-Option, ebenso TrueNAS und OPNsense;
+        sonst genügt ein Raspberry Pi oder ein Proxmox-Host mit dem Paket
+        <code>nut-server</code>.</p>
+        <p>Nötig sind drei Angaben: der <b>Host</b>, auf dem upsd läuft, der <b>USV-Name</b>
+        wie in dessen <code>ups.conf</code> konfiguriert (<code>upsc -l &lt;host&gt;</code>
+        listet die verfügbaren Namen) und optional <b>Benutzer und Passwort</b> — ein
+        Standard-upsd erlaubt das Lesen von Variablen auch ohne beides.</p>
+        <div class="callout info">
+          <span>PVE-UPS ist ein strikt <b>nur lesender</b> NUT-Client: Es fragt ausschließlich
+          die Variablenliste ab, sendet nie einen Befehl und betreibt kein
+          <code>upsmon</code>. NUT dient als Gerätetreiber; Schwellwerte, Host-Logik und die
+          Shutdown-Entscheidung bleiben in dieser Appliance. Auf den geschützten Hosts ist
+          nichts einzurichten.</span>
+        </div>
+        <div class="callout warn">
+          <span>Das NUT-Protokoll ist unverschlüsselt und gehört in ein vertrauenswürdiges
+          Netz. Läuft upsd auf einer Maschine, die PVE-UPS selbst herunterfährt, sollte genau
+          dieser Host als <b>„Dieser Host"</b> markiert sein oder die höchste
+          Shutdown-Reihenfolge haben — sonst verschwindet die Datenquelle mitten im Ausfall.
+          Der Akkubetrieb-Countdown läuft in dem Fall zwar weiter (siehe Abschnitt 7), eine
+          weiterhin erreichbare Quelle ist aber besser.</span>
+        </div>
+
         <h3>Testergebnis lesen</h3>
-        <p>Unter der Ergebniszeile bietet „SNMP testen" die <b>Details je SNMP-Objekt
-        (OID)</b> — jedes Objekt einzeln abgefragt, mit seinem Wert oder dem Grund, warum es
-        fehlt. Der Block klappt von selbst auf, sobald etwas nicht stimmt, und trennt damit
-        die drei Fälle, die sonst gleich aussehen:</p>
+        <p>Unter der Ergebniszeile bietet <b>„USV testen"</b> die <b>Details je Objekt</b> —
+        jedes Objekt einzeln abgefragt, mit seinem Wert oder dem Grund, warum es fehlt. Der
+        Block klappt von selbst auf, sobald etwas nicht stimmt, und trennt damit die Fälle,
+        die sonst gleich aussehen:</p>
         <ul>
-          <li><b>Nichts antwortet</b> (jede Zeile ein Fehler): Adresse, Port, Community oder
-          v3-Zugangsdaten stimmen nicht, oder eine Firewall blockiert UDP&nbsp;161.</li>
+          <li><b>Nichts antwortet</b> (jede Zeile ein Fehler): Adresse, Port oder
+          Zugangsdaten stimmen nicht, oder eine Firewall blockiert UDP&nbsp;161 (SNMP) bzw.
+          TCP&nbsp;3493 (NUT). Bei NUT zusätzlich prüfen, ob die <code>LISTEN</code>-Direktive
+          von upsd diesen Host überhaupt umfasst — standardmäßig lauscht er nur auf
+          localhost.</li>
           <li><b>Manche Objekte antworten, andere melden <code>noSuchObject</code> /
-          <code>noSuchInstance</code></b>: Die USV implementiert diese Objekte schlicht
-          nicht. Quelle und Akkustatus funktionieren weiter; nur die Schwellwerte, die einen
-          fehlenden Wert brauchen, bleiben wirkungslos (z.B. „Restlaufzeit unter" ohne
-          <code>upsEstimatedMinutesRemaining</code>).</li>
+          <code>noSuchInstance</code></b> (SNMP) bzw. <b>„von diesem Treiber nicht
+          geliefert"</b> (NUT): Das Gerät veröffentlicht diese Werte schlicht nicht. Sobald
+          das einen Auslöser betrifft, sagt der Test das im Klartext über der Tabelle — ein
+          Treiber ohne <code>battery.runtime</code> macht etwa die Schwelle „Restlaufzeit
+          unter (min)" dauerhaft wirkungslos. Stattdessen den Zeitgeber „Akkubetrieb länger
+          als (s)" nutzen: Er läuft auf der eigenen Uhr der Appliance und funktioniert
+          immer.</li>
           <li><b><code>noSuchName</code> unter SNMPv1</b>: Das Objekt fehlt <i>und</i> v1
           bricht eine Sammelabfrage ab, sobald ein Objekt fehlt — die reguläre Abfrage
           scheitert dann komplett, obwohl die übrigen Werte lesbar wären. Die USV nach
           Möglichkeit auf <b>v2c</b> umstellen.</li>
+          <li><b>„veraltete Daten"</b> (NUT): upsd antwortet, aber sein Treiber hat den
+          Kontakt zur USV verloren. Die noch gelieferten Werte sind alt, deshalb gilt die USV
+          als nicht erreichbar — Alarm, nie ein Shutdown. Den NUT-Treiber auf der Maschine
+          neu starten.</li>
         </ul>
       </section>
 
@@ -347,24 +400,24 @@ pveum user token add ups@pve shutdown --privsep 0</code></pre>
 
       <section class="card" id="failsafe">
         <h2 class="sec"><span class="n">7</span> Fail-safe &amp; Sonderfälle</h2>
-        <p>Grundprinzip: Ein <b>Verlust der SNMP-Verbindung ist kein bestätigter
+        <p>Grundprinzip: Ein <b>Kontaktverlust zur USV ist kein bestätigter
         Stromausfall</b> — die USV antwortet vielleicht nur kurz nicht, oder ein Switch
         dazwischen ist weg. Standardmäßig löst ein Kommunikationsverlust daher <b>nur
         Alarm</b> aus, keinen Shutdown. Zwei optionale Einstellungen verfeinern das:</p>
         <ul>
-          <li><b>Shutdown bei Verlust fortsetzen</b> (Standard an): Bricht SNMP ab,
+          <li><b>Shutdown bei Verlust fortsetzen</b> (Standard an): Reißt der Kontakt ab,
           <i>nachdem</i> bereits ein Akkubetrieb bestätigt war, läuft ein gestarteter
           Akkubetrieb-Countdown auf der lokalen Uhr weiter und löst bei Ablauf aus. Nur dieser
           zeitbasierte Auslöser überlebt den „blinden" Zustand (Restlaufzeit und Ladestand
-          sind ohne SNMP unbekannt). Hatte ein Auslöser (z.&nbsp;B. Battery-Low oder
+          sind dann nicht lesbar). Hatte ein Auslöser (z.&nbsp;B. Battery-Low oder
           Ladestand-Schwelle) dagegen <b>schon vor dem Verbindungsabriss</b> gegriffen,
           bleibt er bestehen und wird nicht auf den Zeitcountdown zurückgestuft. Countdown
           und ausgelöster Zustand überleben auch einen <b>Neustart des Dienstes</b>: beides
           wird auf Platte gemerkt und beim Start wiederhergestellt (max. 24&nbsp;h alt).</li>
           <li><b>Shutdown nach X Minuten reinem Verlust</b> (Standard aus): Behandelt einen
           reinen Kommunikationsverlust (ohne vorher bestätigten Akkubetrieb) nach X Minuten
-          doch als Ausfall. Bewusstes Opt-in für Umgebungen, in denen ein längerer SNMP-Ausfall
-          als kritisch gilt.</li>
+          doch als Ausfall. Bewusstes Opt-in für Umgebungen, in denen ein längerer
+          Kontaktverlust als kritisch gilt.</li>
         </ul>
         <h3>Übersicht der Fälle</h3>
         <table>
@@ -372,10 +425,11 @@ pveum user token add ups@pve shutdown --privsep 0</code></pre>
           <tbody>
             <tr><td>Netzbetrieb, alles ok</td><td>nichts (Anzeige „Netzbetrieb")</td></tr>
             <tr><td>Akkubetrieb, ein Auslöser greift</td><td>Shutdown (Hosts geordnet, eigener zuletzt)</td></tr>
-            <tr><td>SNMP-Verlust im Netzbetrieb</td><td>nur Alarm, <b>kein</b> Shutdown</td></tr>
-            <tr><td>SNMP-Verlust während laufendem Akku-Countdown</td><td>Countdown läuft weiter, Shutdown bei Ablauf</td></tr>
-            <tr><td>SNMP-Verlust nach bereits ausgelöstem Trigger</td><td>Auslösung bleibt bestehen (keine Rückstufung)</td></tr>
-            <tr><td>Reiner SNMP-Verlust mit aktivem Opt-in</td><td>Shutdown nach Ablauf der Schwelle</td></tr>
+            <tr><td>Kontaktverlust im Netzbetrieb</td><td>nur Alarm, <b>kein</b> Shutdown</td></tr>
+            <tr><td>Kontaktverlust während laufendem Akku-Countdown</td><td>Countdown läuft weiter, Shutdown bei Ablauf</td></tr>
+            <tr><td>Kontaktverlust nach bereits ausgelöstem Trigger</td><td>Auslösung bleibt bestehen (keine Rückstufung)</td></tr>
+            <tr><td>Reiner Kontaktverlust mit aktivem Opt-in</td><td>Shutdown nach Ablauf der Schwelle</td></tr>
+            <tr><td>NUT-Server liefert veraltete Daten</td><td>gilt als nicht erreichbar (Alarm), nie als „Netzbetrieb"</td></tr>
             <tr><td>Dry-Run aktiv</td><td>Auslöser wird erkannt + protokolliert, nichts wird heruntergefahren</td></tr>
             <tr><td>Netz kehrt zurück</td><td>Zustand wird zurückgesetzt</td></tr>
           </tbody>
@@ -492,7 +546,7 @@ volumes:
         ein Neuerstellen des Containers (<code>docker compose pull &amp;&amp; docker compose
         up -d</code>) statt über den In-App-Uploader, und NTP/Zeitzone liegen in der
         Verantwortung des Docker-Hosts/Orchestrators statt über den Wizard gesetzt zu werden
-        — beide Bereiche sind im Webinterface ausgeblendet. Alles Weitere (SNMP-Polling,
+        — beide Bereiche sind im Webinterface ausgeblendet. Alles Weitere (USV-Abfrage,
         Proxmox-Shutdown, Schwellwerte, Webhook, Selbsttest) ist identisch.</p>
         <div class="callout info">
           <span><code>TZ</code> am Container setzen. Die <b>Selbsttest-Startzeit</b> gilt in
@@ -522,11 +576,22 @@ volumes:
 # oder direkt im Container:
 systemctl start pve-usv-agent.service</code></pre>
         <h3>USV nicht erreichbar / Alarm</h3>
-        <p>SNMP-Adresse, Version/Community bzw. v3-Credentials und die Firewall zwischen
-        Appliance und USV prüfen. Im Wizard zeigt „SNMP testen" die genaue Ursache — die
-        <b>Details je SNMP-Objekt (OID)</b> aufklappen, um zu sehen, welches Objekt warum
-        scheitert (siehe <a href="#snmp">SNMP an der USV</a>). Ein Kommunikationsverlust
-        allein fährt nichts herunter (Fail-safe).</p>
+        <p>Adresse, Zugangsdaten und die Firewall zwischen Appliance und USV-Quelle prüfen.
+        Im Wizard zeigt „USV testen" die genaue Ursache — die <b>Details je Objekt</b>
+        aufklappen, um zu sehen, welches Objekt warum scheitert (siehe
+        <a href="#snmp">USV-Quellen</a>). Ein Kommunikationsverlust allein fährt nichts
+        herunter (Fail-safe).</p>
+        <h3>Eine Schwelle löst nie aus</h3>
+        <p>Nicht jedes Gerät meldet jeden Wert. „USV testen" ausführen: Liefert das Gerät
+        keine Restlaufzeit oder keinen Ladestand, sagt der Test das über der Objekttabelle —
+        die zugehörige Schwelle ist dann dauerhaft wirkungslos. Stattdessen „Akkubetrieb
+        länger als (s)" nutzen; dieser Zeitgeber läuft auf der eigenen Uhr der Appliance.</p>
+        <h3>NUT: „kennt keine USV mit diesem Namen" oder gar keine Antwort</h3>
+        <p>Der USV-Name muss dem Abschnittsnamen in der <code>ups.conf</code> von upsd
+        entsprechen; <code>upsc -l &lt;host&gt;</code> listet die gültigen Namen. Antwortet
+        gar nichts, lauscht upsd meist nur auf localhost — seine <code>LISTEN</code>-Direktive
+        muss die Schnittstelle abdecken, über die die Appliance verbindet, und TCP&nbsp;3493
+        muss offen sein.</p>
         <h3>SNMPv3 mit Verschlüsselung schlägt fehl</h3>
         <p>Meldet ein authPriv-Benutzer <i>„Ciphering services not available"</i> oder weist
         der Test auf fehlende Verschlüsselung hin, fehlt der Appliance das Python-Paket
@@ -549,6 +614,23 @@ systemctl start pve-usv-agent.service</code></pre>
         <p class="muted">Vereinfachte, nutzersichtbare Highlights. Der vollständige technische
         Verlauf steht im <a href="https://github.com/ffind-dev/pve-ups/blob/main/CHANGELOG.md"
         target="_blank" rel="noopener">Changelog des GitHub-Repositories</a>.</p>
+
+        <div class="cl-ver">3.2.0 <span class="date">2026</span></div>
+        <ul>
+          <li><b>USVs ohne Netzwerkkarte</b> lassen sich jetzt überwachen: Ein USV-Eintrag
+          wird entweder wie bisher per SNMP gelesen oder über einen <b>NUT-Server</b> — so
+          werden USB- und seriell angeschlossene USVs erreicht. Beides ist in einer Instanz
+          mischbar. Siehe <a href="#snmp">USV-Quellen</a>.</li>
+          <li>PVE-UPS bleibt ein strikt nur lesender NUT-Client — kein <code>upsmon</code>,
+          keine Shutdown-Skripte, keine Konfigdateien. Die Entscheidung bleibt in der
+          Appliance.</li>
+          <li><b>Der USV-Test benennt tote Schwellen</b>: Meldet ein Gerät weder Restlaufzeit
+          noch Ladestand, sagt der Test das — statt eine Schwelle zu hinterlassen, die
+          stillschweigend nie auslöst.</li>
+          <li>Ein NUT-Server, der veraltete Daten liefert (sein Treiber ist abgestürzt), gilt
+          als nicht erreichbar — Alarm, nie ein Shutdown, und nie mit „Netzbetrieb"
+          verwechselt.</li>
+        </ul>
 
         <div class="cl-ver">3.1.0 <span class="date">2026</span></div>
         <ul>

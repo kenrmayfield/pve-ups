@@ -183,7 +183,7 @@ function upsCardHtml(u) {
     ? `<div class="stat"><span>${esc(t("ups.commLossIn"))}</span><b>${u.comm_loss_remaining_s} s</b></div>` : "";
   return `<div class="card ups-card is-${upsStatusCls(u)}">
     <div class="card-h"><h3><svg class="icon batt-ic"><use href="#i-battery"></use></svg>${esc(u.name)}</h3>${statIc}</div>
-    <div class="hero-meta"><span>${esc(t("ups.source"))} ${src}</span><span class="faint">·</span><span>${esc(model) || "–"}</span></div>
+    <div class="hero-meta"><span>${esc(t("ups.source"))} ${src}</span><span class="faint">·</span><span>${esc(model) || "–"}</span><span class="faint">·</span><span class="muted">${esc(t("ups.via", { src: t("src." + (u.type || "snmp")) }))}</span></div>
     <div class="metric" style="margin-top:8px">
       <span class="k">${esc(t("ups.charge"))} ${pct === null ? "–" : pct + " %"}</span>
       <div class="gauge"><div class="gauge-fill${gcls}" style="width:${gw}"></div></div>
@@ -316,6 +316,9 @@ function getChk(id) { return $(id).checked; }
 // t() is available at parse time (i18n.js loads before app.js).
 const AUTH_PROTOS = [["none", t("proto.none")], ["md5", "MD5"], ["sha", "SHA"], ["sha256", "SHA-256"], ["sha512", "SHA-512"]];
 const PRIV_PROTOS = [["none", t("proto.none")], ["des", "DES"], ["aes", "AES-128"], ["aes256", "AES-256"]];
+// Must match config.UpsSourceType; tests/test_i18n.py keeps the labels in both dictionaries.
+const SOURCE_TYPES = [["snmp", t("src.snmp")], ["nut", t("src.nut")]];
+const DEFAULT_PORTS = { snmp: 161, nut: 3493 };
 const TRISTATE = [["", t("tristate.global")], ["on", t("tristate.on")], ["off", t("tristate.off")]];
 const opts = (list, val) => list.map(([v, l]) => `<option value="${v}" ${v === val ? "selected" : ""}>${l}</option>`).join("");
 const triVal = (v) => v === true ? "on" : v === false ? "off" : "";
@@ -347,31 +350,46 @@ function addUpsCard(u, open) {
   const div = document.createElement("details");
   div.className = "ups-cfg";
   if (open !== false) div.open = true;
+  const type = u.type || "snmp";
   const commPh = u.community === SECRET_PLACEHOLDER ? t("cfg.unchanged") : "public";
   const authPh = u.v3_auth_pass === SECRET_PLACEHOLDER ? t("cfg.unchanged") : "";
   const privPh = u.v3_priv_pass === SECRET_PLACEHOLDER ? t("cfg.unchanged") : "";
+  const nutPh = u.password === SECRET_PLACEHOLDER ? t("cfg.unchanged") : t("cfg.nutPwPh");
   div.innerHTML = `
     <summary class="cfg-head">${svgIcon("i-battery")}<span class="cfg-title u_sum_name"></span><span class="cfg-sub u_sum_host"></span></summary>
     <input type="hidden" class="u_id" value="${esc(id)}" />
     <div class="row">
       <label title="${esc(t("cfg.nameTitle"))}">${esc(t("cfg.name"))} <input class="u_name" value="${esc(u.name || "")}" placeholder="${esc(t("cfg.upsNamePh", { id }))}" /></label>
+      <label title="${esc(t("cfg.srcTypeTitle"))}">${esc(t("cfg.srcType"))} <select class="u_type">${opts(SOURCE_TYPES, type)}</select></label>
       <label title="${esc(t("cfg.hostipTitle"))}">${esc(t("cfg.hostip"))} <input class="u_host" value="${esc(u.host || "")}" placeholder="10.0.0.9" /></label>
-      <label title="${esc(t("cfg.portTitle"))}">${esc(t("cfg.port"))} <input class="u_port" type="number" value="${u.port || 161}" /></label>
-      <label title="${esc(t("cfg.versionTitle"))}">${esc(t("cfg.version"))} <select class="u_version">${opts([["v1", "v1"], ["v2c", "v2c"], ["v3", "v3"]], u.version || "v2c")}</select></label>
+      <label title="${esc(t("cfg.portTitle"))}">${esc(t("cfg.port"))} <input class="u_port" type="number" value="${u.port || DEFAULT_PORTS[type]}" /></label>
     </div>
-    <div class="u_v2c">
-      <label title="${esc(t("cfg.communityTitle"))}">${esc(t("cfg.community"))} <input class="u_community" placeholder="${esc(commPh)}" /></label>
+    <div class="u_snmp">
+      <div class="row">
+        <label title="${esc(t("cfg.versionTitle"))}">${esc(t("cfg.version"))} <select class="u_version">${opts([["v1", "v1"], ["v2c", "v2c"], ["v3", "v3"]], u.version || "v2c")}</select></label>
+      </div>
+      <div class="u_v2c">
+        <label title="${esc(t("cfg.communityTitle"))}">${esc(t("cfg.community"))} <input class="u_community" placeholder="${esc(commPh)}" /></label>
+      </div>
+      <div class="u_v3" hidden>
+        <div class="row">
+          <label title="${esc(t("cfg.v3userTitle"))}">${esc(t("cfg.v3user"))} <input class="u_v3_user" value="${esc(u.v3_user || "")}" /></label>
+          <label title="${esc(t("cfg.v3authTitle"))}">${esc(t("cfg.v3auth"))} <select class="u_v3_auth_proto">${opts(AUTH_PROTOS, u.v3_auth_proto || "sha")}</select></label>
+          <label title="${esc(t("cfg.v3authpwTitle"))}">${esc(t("cfg.v3authpw"))} <input class="u_v3_auth_pass" type="password" placeholder="${esc(authPh)}" /></label>
+        </div>
+        <div class="row">
+          <label title="${esc(t("cfg.v3privTitle"))}">${esc(t("cfg.v3priv"))} <select class="u_v3_priv_proto">${opts(PRIV_PROTOS, u.v3_priv_proto || "aes")}</select></label>
+          <label title="${esc(t("cfg.v3privpwTitle"))}">${esc(t("cfg.v3privpw"))} <input class="u_v3_priv_pass" type="password" placeholder="${esc(privPh)}" /></label>
+        </div>
+      </div>
     </div>
-    <div class="u_v3" hidden>
+    <div class="u_nut" hidden>
       <div class="row">
-        <label title="${esc(t("cfg.v3userTitle"))}">${esc(t("cfg.v3user"))} <input class="u_v3_user" value="${esc(u.v3_user || "")}" /></label>
-        <label title="${esc(t("cfg.v3authTitle"))}">${esc(t("cfg.v3auth"))} <select class="u_v3_auth_proto">${opts(AUTH_PROTOS, u.v3_auth_proto || "sha")}</select></label>
-        <label title="${esc(t("cfg.v3authpwTitle"))}">${esc(t("cfg.v3authpw"))} <input class="u_v3_auth_pass" type="password" placeholder="${esc(authPh)}" /></label>
+        <label title="${esc(t("cfg.nutNameTitle"))}">${esc(t("cfg.nutName"))} <input class="u_ups_name" value="${esc(u.ups_name || "")}" placeholder="ups" /></label>
+        <label title="${esc(t("cfg.nutUserTitle"))}">${esc(t("cfg.nutUser"))} <input class="u_nut_user" value="${esc(u.username || "")}" /></label>
+        <label title="${esc(t("cfg.nutPwTitle"))}">${esc(t("cfg.nutPw"))} <input class="u_nut_pass" type="password" placeholder="${esc(nutPh)}" /></label>
       </div>
-      <div class="row">
-        <label title="${esc(t("cfg.v3privTitle"))}">${esc(t("cfg.v3priv"))} <select class="u_v3_priv_proto">${opts(PRIV_PROTOS, u.v3_priv_proto || "aes")}</select></label>
-        <label title="${esc(t("cfg.v3privpwTitle"))}">${esc(t("cfg.v3privpw"))} <input class="u_v3_priv_pass" type="password" placeholder="${esc(privPh)}" /></label>
-      </div>
+      <p class="muted" style="margin:.15rem 0 0">${esc(t("cfg.nutHint"))}</p>
     </div>
     <details class="u_over">
       <summary>${esc(t("cfg.overrideSummary"))} <span class="muted">${esc(t("cfg.overrideGlobal"))}</span></summary>
@@ -387,12 +405,12 @@ function addUpsCard(u, open) {
       </div>
     </details>
     <div class="row" style="margin:0;align-items:center">
-      <button class="btn-ghost btn-sm u_test" style="flex:0 0 auto">${esc(t("cfg.testSnmp"))}</button>
+      <button class="btn-ghost btn-sm u_test" style="flex:0 0 auto">${esc(t("cfg.testUps"))}</button>
       <button class="btn-ghost btn-sm u_del" style="flex:0 0 auto">${esc(t("cfg.removeUps"))}</button>
       <span class="muted u_msg"></span>
     </div>
     <details class="help u_diagwrap" hidden style="margin-top:.5rem">
-      <summary>${esc(t("snmp.diag"))}</summary>
+      <summary>${esc(t("probe.diag"))}</summary>
       <pre class="u_diag" style="white-space:pre-wrap;overflow:auto;max-height:16rem;font-family:monospace;font-size:.85em"></pre>
     </details>`;
   const toggleVer = () => {
@@ -400,20 +418,35 @@ function addUpsCard(u, open) {
     div.querySelector(".u_v3").hidden = !v3;
     div.querySelector(".u_v2c").hidden = v3;
   };
+  const toggleType = () => {
+    const ty = div.querySelector(".u_type").value;
+    div.querySelector(".u_snmp").hidden = ty !== "snmp";
+    div.querySelector(".u_nut").hidden = ty !== "nut";
+    updSum();
+  };
   const updSum = () => {
     const nm = div.querySelector(".u_name").value.trim() || t("cfg.upsNamePh", { id });
     const hs = div.querySelector(".u_host").value.trim();
+    const ty = div.querySelector(".u_type").value;
     div.querySelector(".u_sum_name").textContent = nm;
-    div.querySelector(".u_sum_host").textContent = hs ? "· " + hs : "";
+    div.querySelector(".u_sum_host").textContent = hs ? "· " + hs + " (" + t("src." + ty) + ")" : "";
   };
   div.querySelector(".u_version").onchange = toggleVer;
+  div.querySelector(".u_type").onchange = () => {
+    // Carry the port over to the new type's default, unless the user typed their own.
+    const ty = div.querySelector(".u_type").value;
+    const portEl = div.querySelector(".u_port");
+    const known = Object.values(DEFAULT_PORTS).includes(Number(portEl.value));
+    if (!portEl.value || known) portEl.value = DEFAULT_PORTS[ty];
+    toggleType();
+  };
   div.querySelector(".u_name").oninput = () => { updSum(); renderHostUpsCheckboxes(); drawConfigTopology(); };
   div.querySelector(".u_host").oninput = updSum;
   div.querySelector(".u_test").onclick = () => testUps(div);
   div.querySelector(".u_del").onclick = () => { div.remove(); renderHostUpsCheckboxes(); drawConfigTopology(); };
   $("upsList").appendChild(div);
   toggleVer();
-  updSum();
+  toggleType();
 }
 
 $("addUpsBtn").onclick = () => { addUpsCard({}, true); renderHostUpsCheckboxes(); drawConfigTopology(); };
@@ -422,19 +455,14 @@ function upsFromCard(div) {
   const q = (s) => div.querySelector(s);
   const numOr = (s) => { const v = q(s).value.trim(); return v === "" ? null : Number(v); };
   const tri = (s) => { const v = q(s).value; return v === "on" ? true : v === "off" ? false : null; };
-  const comm = q(".u_community").value, ap = q(".u_v3_auth_pass").value, pp = q(".u_v3_priv_pass").value;
-  return {
+  const type = q(".u_type").value;
+  // Only the fields of the selected type are sent; the backend picks the model by "type".
+  const base = {
     id: q(".u_id").value,
     name: q(".u_name").value.trim(),
+    type,
     host: q(".u_host").value.trim(),
-    port: Number(q(".u_port").value || 161),
-    version: q(".u_version").value,
-    community: comm === "" ? SECRET_PLACEHOLDER : comm,
-    v3_user: q(".u_v3_user").value,
-    v3_auth_proto: q(".u_v3_auth_proto").value,
-    v3_auth_pass: ap === "" ? SECRET_PLACEHOLDER : ap,
-    v3_priv_proto: q(".u_v3_priv_proto").value,
-    v3_priv_pass: pp === "" ? SECRET_PLACEHOLDER : pp,
+    port: Number(q(".u_port").value || DEFAULT_PORTS[type]),
     overrides: {
       on_battery_seconds: numOr(".o_obs"),
       runtime_below_minutes: numOr(".o_rbm"),
@@ -444,6 +472,24 @@ function upsFromCard(div) {
       keep_shutdown_on_comm_loss: tri(".o_ksc"),
     },
   };
+  if (type === "nut") {
+    const np = q(".u_nut_pass").value;
+    return Object.assign(base, {
+      ups_name: q(".u_ups_name").value.trim(),
+      username: q(".u_nut_user").value.trim(),
+      password: np === "" ? SECRET_PLACEHOLDER : np,
+    });
+  }
+  const comm = q(".u_community").value, ap = q(".u_v3_auth_pass").value, pp = q(".u_v3_priv_pass").value;
+  return Object.assign(base, {
+    version: q(".u_version").value,
+    community: comm === "" ? SECRET_PLACEHOLDER : comm,
+    v3_user: q(".u_v3_user").value,
+    v3_auth_proto: q(".u_v3_auth_proto").value,
+    v3_auth_pass: ap === "" ? SECRET_PLACEHOLDER : ap,
+    v3_priv_proto: q(".u_v3_priv_proto").value,
+    v3_priv_pass: pp === "" ? SECRET_PLACEHOLDER : pp,
+  });
 }
 
 function currentUpsList() {
@@ -451,16 +497,23 @@ function currentUpsList() {
     .map(upsFromCard).filter((u) => u.host || u.name);
 }
 
-// One line per RFC 1628 object, so a user can see exactly which one the UPS is missing.
-// Status words come from the dictionary, the summary is the backend's English text
-// (like every other API message).
+// One line per object (RFC 1628 OID or NUT variable), so a user can see exactly which one
+// the UPS is missing. Status words come from the dictionary, the summary is the backend's
+// English text (like every other API message).
 function renderProbe(p) {
   const lines = (p.entries || []).map((e) => {
-    const st = t("snmp.st." + e.status, { err: e.error || "" });
-    return e.name.padEnd(30) + e.oid.padEnd(24) + st + (e.status === "ok" ? " = " + e.value : "");
+    const st = t("probe.st." + e.status, { err: e.error || "" });
+    return e.name.padEnd(30) + (e.oid || "").padEnd(e.oid ? 24 : 0) + st
+      + (e.status === "ok" ? " = " + e.value : "");
   });
-  return [t("snmp.diagHead", { ok: p.ok_count, n: p.total }), p.summary || "", ""]
-    .concat(lines).join("\n");
+  const head = [t("probe.head", { ok: p.ok_count, n: p.total })];
+  // A threshold that can never fire is worse than a visible error: say so up front.
+  if ((p.missing_triggers || []).length) {
+    head.push(t("probe.missingTriggers", {
+      list: p.missing_triggers.map((x) => t("probe.trg." + x)).join(", "),
+    }));
+  }
+  return head.concat([p.summary || "", ""]).concat(lines).join("\n");
 }
 
 async function testUps(div) {
@@ -470,12 +523,13 @@ async function testUps(div) {
   msg.textContent = t("msg.testing");
   wrap.hidden = true;
   try {
-    const r = await api("/api/test/snmp", "POST", upsFromCard(div));
+    const r = await api("/api/test/ups", "POST", upsFromCard(div));
     msg.textContent = r.reachable
-      ? t("snmp.ok", { src: r.power_source, batt: r.battery_status, min: r.runtime_remaining_min, pct: r.battery_charge_pct })
-      : t("snmp.fail", { err: r.error || "" });
+      ? t("probe.ok", { src: r.power_source, batt: r.battery_status, min: r.runtime_remaining_min, pct: r.battery_charge_pct })
+      : t("probe.fail", { err: r.error || "" });
     if (r.probe) {
-      const trouble = !r.reachable || r.probe.ok_count < r.probe.total;
+      const trouble = !r.reachable || r.probe.ok_count < r.probe.total
+        || (r.probe.missing_triggers || []).length > 0;
       pre.textContent = renderProbe(r.probe);
       wrap.hidden = false;
       wrap.open = trouble;  // unfold on its own exactly when there is something to see

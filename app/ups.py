@@ -1,11 +1,16 @@
-"""SNMP poller for the UPS.
+"""SNMP poller for the UPS, plus the source-neutral state objects.
 
 Reads the standard RFC 1628 UPS-MIB, which network UPS cards implement vendor-
 independently. Supports SNMP v1/v2c (community) and v3 (authPriv). Pure-Python via
 pysnmp, no external net-snmp binaries required.
 
+``UpsState``, ``ProbeEntry`` and ``ProbeResult`` live here but are *not* SNMP-specific:
+they are the contract every UPS source produces (see app/sources.py for the dispatch and
+app/nut.py for the second implementation). The engine only ever sees these, which is why
+the whole trigger/policy/fail-safe machinery is transport-independent.
+
 A failed/timed-out poll yields ``reachable = False`` and never produces a
-shutdown-worthy state: loss of SNMP communication is treated as an alarm, not as
+shutdown-worthy state: loss of communication with the UPS is treated as an alarm, not as
 a power failure (fail safe, not fail shutdown).
 
 Copyright 2026 Florian Finder
@@ -73,18 +78,38 @@ _OID_NAMES = {
     OID_CHARGE_REMAINING: "upsEstimatedChargeRemaining",
 }
 
-# Closed set of per-OID probe outcomes. The UI labels each one via the i18n key
-# "snmp.st.<status>", so a new status here needs a matching key in both dictionaries
-# (app/web/i18n/en.js + de.js) — tests/test_i18n.py enforces that.
+# Closed set of per-object probe outcomes, shared by every UPS source. The UI labels each
+# one via the i18n key "probe.st.<status>", so a new status here needs a matching key in
+# both dictionaries (app/web/i18n/en.js + de.js) — tests/test_i18n.py enforces that.
+# The four SNMP-flavoured ones are only ever emitted by this module; "missing"/"stale"
+# are their equivalents for sources that answer with named variables (see app/nut.py).
 PROBE_STATUSES = (
     "ok",
     "noSuchObject",
     "noSuchInstance",
     "endOfMibView",
     "noSuchName",
+    "missing",
+    "stale",
     "error",
     "skipped",
 )
+
+# Trigger conditions whose availability depends on what the device actually reports. A
+# probe lists the ones it could not read, so the wizard can warn instead of leaving the
+# user with a threshold that will never fire. The UI labels each via "probe.trg.<name>".
+# ``on_battery`` is outage detection itself; the on_battery_seconds timer runs on our own
+# clock and therefore always works, which is why it is not listed here.
+PROBE_TRIGGERS = ("on_battery", "battery_low", "runtime", "charge")
+
+# Which object each device-dependent trigger needs (see PROBE_TRIGGERS). Insertion order
+# is the order the wizard lists them in.
+_TRIGGER_OIDS = {
+    OID_OUTPUT_SOURCE: "on_battery",
+    OID_BATTERY_STATUS: "battery_low",
+    OID_MINUTES_REMAINING: "runtime",
+    OID_CHARGE_REMAINING: "charge",
+}
 
 # v2c/v3 report a missing object as a per-varbind sentinel value instead of an error.
 # Matched by class name, not isinstance: the classes moved between pysnmp 6.x and 7.x,
@@ -121,11 +146,11 @@ class UpsState:
 
 @dataclass
 class ProbeEntry:
-    """Outcome of a single-OID GET during the manual SNMP test."""
+    """Outcome of reading one object during the manual UPS test."""
 
-    oid: str
-    name: str                       # RFC 1628 object name, e.g. "upsOutputSource"
+    name: str                       # object name, e.g. "upsOutputSource" or "ups.status"
     status: str                     # one of PROBE_STATUSES
+    oid: str = ""                   # SNMP OID; empty for sources without one
     value: Optional[str] = None     # interpreted value, e.g. "battery (5)" (status "ok")
     raw: Optional[str] = None       # value as the device spelled it (status "ok")
     error: Optional[str] = None     # English error text (status "error")
@@ -140,6 +165,9 @@ class ProbeResult:
     ok_count: int = 0
     total: int = 0
     entries: list[ProbeEntry] = field(default_factory=list)
+    # Trigger conditions this device cannot feed (subset of PROBE_TRIGGERS). Only
+    # meaningful when ``reachable`` — an unreachable UPS reports nothing at all.
+    missing_triggers: list[str] = field(default_factory=list)
 
 
 def _auth_protocol(proto: SnmpAuthProto):
@@ -508,5 +536,10 @@ async def probe(cfg: SnmpConfig) -> ProbeResult:
     result.entries.extend(_skipped(oid) for oid in _ALL_OIDS if oid not in probed)
     result.ok_count = sum(1 for e in result.entries if e.status == "ok")
     result.reachable = result.ok_count > 0
+    if result.reachable:
+        answered = {e.oid for e in result.entries if e.status == "ok"}
+        result.missing_triggers = [
+            trigger for oid, trigger in _TRIGGER_OIDS.items() if oid not in answered
+        ]
     result.summary = _probe_summary(cfg, result, first_error)
     return result

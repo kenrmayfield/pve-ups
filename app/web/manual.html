@@ -167,7 +167,7 @@
   <header class="topbar">
     <span class="brand">
       <svg class="mark icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5v6c0 5 3.4 8.5 8 11 4.6-2.5 8-6 8-11V5l-8-3z"/></svg>
-      PVE-UPS <span class="sub">User Manual · v3.1.0</span>
+      PVE-UPS <span class="sub">User Manual · v3.2.0</span>
     </span>
     <span class="spacer"></span>
     <a class="btn" href="https://github.com/ffind-dev/pve-ups" target="_blank"
@@ -189,7 +189,7 @@
         <li><a href="#voraussetzungen">Requirements</a></li>
         <li><a href="#installation">Installation &amp; setup</a></li>
         <li><a href="#token">Proxmox API token</a></li>
-        <li><a href="#snmp">SNMP on the UPS</a></li>
+        <li><a href="#snmp">UPS sources</a></li>
         <li><a href="#logik">How it works &amp; logic</a></li>
         <li><a href="#failsafe">Fail-safe &amp; edge cases</a></li>
         <li><a href="#ausloeser">Triggers &amp; thresholds</a></li>
@@ -204,10 +204,10 @@
       <div class="card intro">
         <h1>PVE-UPS — User Manual</h1>
         <p class="muted">A lean UPS shutdown appliance for Proxmox VE: it monitors one or
-        more network-attached UPS devices via SNMP and, on a power outage, shuts down the
-        assigned Proxmox hosts in an orderly fashion — without NUT and without hand-written
-        configuration files. This manual is aimed at technically minded administrators who
-        are new to the product.</p>
+        more UPS devices — via SNMP or through a NUT server — and, on a power outage, shuts
+        down the assigned Proxmox hosts in an orderly fashion, without hand-written
+        configuration files anywhere. This manual is aimed at technically minded
+        administrators who are new to the product.</p>
       </div>
 
       <section class="card" id="was">
@@ -218,8 +218,9 @@
         nothing but one installer script.</p>
         <h3>Core features</h3>
         <ul>
-          <li>Monitoring of <b>one or more UPS devices</b> with an SNMP network card
-          (standard RFC&nbsp;1628) via <b>SNMP v1/v2c/v3</b> — pure-Python implementation.</li>
+          <li>Monitoring of <b>one or more UPS devices</b> — with an SNMP network card
+          (standard RFC&nbsp;1628, <b>SNMP v1/v2c/v3</b>, pure-Python implementation) or
+          through a <b>NUT server</b>, which is how USB and serial UPS devices are read.</li>
           <li>Orderly host shutdown through a <b>Proxmox API token</b> (privilege
           <code>Sys.PowerMgmt</code>) — no root SSH required.</li>
           <li><b>Host↔UPS mapping</b> with per-host logic (AND/OR) for redundant power
@@ -227,8 +228,8 @@
           <li>Complete setup through a <b>web wizard</b> with test buttons.</li>
           <li>Web UI in <b>English and German</b> — picked automatically from the browser
           language.</li>
-          <li><b>Fail-safe:</b> a lost SNMP connection raises an alarm by default, it never
-          shuts anything down.</li>
+          <li><b>Fail-safe:</b> losing contact with the UPS raises an alarm by default, it
+          never shuts anything down.</li>
           <li><b>Dry-run mode</b> for a risk-free commissioning.</li>
           <li>Read-only <b>REST/JSON status</b> for monitoring (<code>/api/status</code>,
           <code>/api/health</code>).</li>
@@ -240,10 +241,17 @@
         <ul>
           <li>A <b>Proxmox VE</b> host (standalone — no cluster/HA-manager interaction) that
           can run the LXC. Typically one of the hosts to be protected.</li>
-          <li>One or more <b>UPS devices with an SNMP network card</b> exposing the standard
-          <b>RFC 1628 UPS MIB</b> via SNMP (vendor-independent).</li>
-          <li>Network connectivity between the appliance and the UPS (SNMP, read access is
-          enough) and to the Proxmox API of the protected hosts (HTTPS, port 8006).</li>
+          <li>One or more UPS devices, reachable in one of two ways:
+            <ul>
+              <li>with an <b>SNMP network card</b> exposing the standard
+              <b>RFC 1628 UPS MIB</b> (vendor-independent), or</li>
+              <li>attached by <b>USB or serial cable</b> to a machine that runs a
+              <b>NUT server</b> (<code>upsd</code>) — see section 5.</li>
+            </ul>
+          </li>
+          <li>Network connectivity between the appliance and the UPS source (read access is
+          enough: UDP 161 for SNMP, TCP 3493 for NUT) and to the Proxmox API of the
+          protected hosts (HTTPS, port 8006).</li>
         </ul>
       </section>
 
@@ -260,8 +268,8 @@ curl -fsSL https://github.com/ffind-dev/pve-ups/releases/latest/download/install
         through the wizard:</p>
         <ol class="steps">
           <li>Set the UI password.</li>
-          <li>Add the <b>UPS devices</b> (SNMP address/version) and verify each one with
-          “Test SNMP”.</li>
+          <li>Add the <b>UPS devices</b> (source, address, credentials — see section 5) and
+          verify each one with “Test UPS”.</li>
           <li>Add the <b>Proxmox hosts</b> (API token, see section 4) and use “Test”.
           Define which UPS devices feed each host and with which logic (AND/OR).</li>
           <li>Set the <b>thresholds</b> or keep the defaults.</li>
@@ -292,28 +300,66 @@ pveum user token add ups@pve shutdown --privsep 0</code></pre>
       </section>
 
       <section class="card" id="snmp">
-        <h2 class="sec"><span class="n">5</span> SNMP on the UPS</h2>
+        <h2 class="sec"><span class="n">5</span> UPS sources</h2>
+        <p>Every UPS entry in the wizard has a <b>“Read via”</b> selector. Both sources can
+        be mixed freely in one instance, and everything after this point — thresholds, host
+        mapping, fail-safe rules — is identical for either.</p>
+
+        <h3>SNMP (UPS with a network card)</h3>
         <p>In the web interface of the UPS network card (usually under <i>Network → SNMPv1</i>
         or <i>SNMPv3</i>), enable access and grant the appliance IP <b>read access</b>. Only
-        the standard RFC 1628 UPS MIB is read (no write access). The wizard test immediately
-        shows the source (mains/battery), battery status, remaining runtime and charge.</p>
+        the standard RFC 1628 UPS MIB is read (no write access). Default port 161/UDP.</p>
+
+        <h3>NUT server (USB and serial UPS devices)</h3>
+        <p>A UPS without a network card is reached through
+        <a href="https://networkupstools.org/" target="_blank" rel="noopener">Network UPS
+        Tools</a>: whichever machine the UPS is plugged into runs <code>upsd</code>, and
+        PVE-UPS reads from it over TCP&nbsp;3493. Very often such a server already exists —
+        Synology and QNAP NAS boxes have a “UPS server” checkbox, as do TrueNAS and
+        OPNsense; otherwise a Raspberry Pi or a Proxmox host with the <code>nut-server</code>
+        package will do.</p>
+        <p>Three fields are needed: the <b>host</b> running upsd, the <b>UPS name</b> as
+        configured in its <code>ups.conf</code> (<code>upsc -l &lt;host&gt;</code> lists the
+        available names), and optionally a <b>user name and password</b> — a default upsd
+        allows reading variables without either.</p>
+        <div class="callout info">
+          <span>PVE-UPS is a strictly <b>read-only</b> NUT client: it only ever asks for the
+          variable list, never sends a command, and never runs <code>upsmon</code>. NUT acts
+          as the device driver; the thresholds, the host policy and the shutdown decision
+          stay in this appliance. There is nothing to configure on the protected hosts.</span>
+        </div>
+        <div class="callout warn">
+          <span>The NUT protocol is unencrypted. Use it inside a trusted network. If upsd
+          runs on a machine that PVE-UPS itself shuts down, make sure that host is the one
+          marked <b>“This host”</b> or has the highest shutdown order — otherwise the data
+          source disappears mid-outage. The on-battery countdown does keep running in that
+          case (see section 7), but a still-reachable source is better.</span>
+        </div>
+
         <h3>Reading the test result</h3>
-        <p>Below the result line, “Test SNMP” offers <b>Details per SNMP object (OID)</b> —
-        every object queried individually, with its value or the reason it is missing. It
-        unfolds on its own whenever something is wrong, which separates the three cases that
-        otherwise look identical:</p>
+        <p>Below the result line, <b>“Test UPS”</b> offers <b>Details per object</b> — every
+        object queried individually, with its value or the reason it is missing. It unfolds
+        on its own whenever something is wrong, which separates the cases that otherwise
+        look identical:</p>
         <ul>
-          <li><b>Nothing answers</b> (every line an error): address, port, community or v3
-          credentials are wrong, or a firewall blocks UDP&nbsp;161.</li>
+          <li><b>Nothing answers</b> (every line an error): address, port or credentials are
+          wrong, or a firewall blocks UDP&nbsp;161 (SNMP) / TCP&nbsp;3493 (NUT). For NUT,
+          also check that upsd's <code>LISTEN</code> directive covers this host — by default
+          it only listens on localhost.</li>
           <li><b>Some objects answer, others say <code>noSuchObject</code> /
-          <code>noSuchInstance</code></b>: the UPS simply does not implement those objects.
-          Source and battery status keep working; only the thresholds that need a missing
-          value stay ineffective (e.g. “remaining runtime below” without
-          <code>upsEstimatedMinutesRemaining</code>).</li>
+          <code>noSuchInstance</code></b> (SNMP) or <b>“not provided by this driver”</b>
+          (NUT): the device simply does not publish those values. Whenever that affects a
+          trigger, the test says so in plain words above the table — for example a driver
+          without <code>battery.runtime</code> makes the “Runtime below (min)” threshold
+          permanently ineffective. Use the “On battery longer than (s)” timer instead: it
+          runs on the appliance's own clock and always works.</li>
           <li><b><code>noSuchName</code> under SNMPv1</b>: the object is missing <i>and</i>
           v1 aborts a multi-object query as soon as one object is absent — the regular poll
           then fails completely even though the other values are readable. Switch the UPS to
           <b>v2c</b> if it supports it.</li>
+          <li><b>“stale data”</b> (NUT): upsd answers, but its driver has lost contact with
+          the UPS. The values it still serves are old, so PVE-UPS treats the UPS as
+          unreachable — an alarm, never a shutdown. Restart the NUT driver on that machine.</li>
         </ul>
       </section>
 
@@ -351,19 +397,19 @@ pveum user token add ups@pve shutdown --privsep 0</code></pre>
         a communication loss therefore raises <b>only an alarm</b>, no shutdown. Two optional
         settings refine this:</p>
         <ul>
-          <li><b>Continue the shutdown on loss</b> (default on): if SNMP drops
-          <i>after</i> on-battery operation was already confirmed, a started on-battery
+          <li><b>Continue the shutdown on loss</b> (default on): if contact with the UPS is
+          lost <i>after</i> on-battery operation was already confirmed, a started on-battery
           countdown keeps running on the local clock and fires when it expires. Only this
-          time-based trigger survives the “blind” state (runtime and charge are unknown
-          without SNMP). If a trigger (e.g. battery-low or the charge threshold) had already
+          time-based trigger survives the “blind” state (runtime and charge are unreadable
+          then). If a trigger (e.g. battery-low or the charge threshold) had already
           fired <b>before the connection dropped</b>, it stays latched and is not downgraded
           to the time countdown. Both the countdown and the triggered state also survive a
           <b>service restart</b>: they are persisted to disk and restored on start
           (max. 24&nbsp;h old).</li>
           <li><b>Shutdown after X minutes of pure loss</b> (default off): treats a pure
           communication loss (without previously confirmed battery operation) as an outage
-          after X minutes. A deliberate opt-in for environments where a prolonged SNMP
-          outage counts as critical.</li>
+          after X minutes. A deliberate opt-in for environments where a prolonged loss of
+          contact counts as critical.</li>
         </ul>
         <h3>Case overview</h3>
         <table>
@@ -371,10 +417,11 @@ pveum user token add ups@pve shutdown --privsep 0</code></pre>
           <tbody>
             <tr><td>On mains, all good</td><td>nothing (shows “On mains”)</td></tr>
             <tr><td>On battery, a trigger fires</td><td>shutdown (hosts in order, own host last)</td></tr>
-            <tr><td>SNMP loss while on mains</td><td>alarm only, <b>no</b> shutdown</td></tr>
-            <tr><td>SNMP loss during a running battery countdown</td><td>countdown continues, shutdown when it expires</td></tr>
-            <tr><td>SNMP loss after an already fired trigger</td><td>trigger stays latched (no downgrade)</td></tr>
-            <tr><td>Pure SNMP loss with the opt-in active</td><td>shutdown once the threshold expires</td></tr>
+            <tr><td>Contact lost while on mains</td><td>alarm only, <b>no</b> shutdown</td></tr>
+            <tr><td>Contact lost during a running battery countdown</td><td>countdown continues, shutdown when it expires</td></tr>
+            <tr><td>Contact lost after an already fired trigger</td><td>trigger stays latched (no downgrade)</td></tr>
+            <tr><td>Pure loss of contact with the opt-in active</td><td>shutdown once the threshold expires</td></tr>
+            <tr><td>NUT server answers with stale data</td><td>counts as unreachable (alarm), never as “on mains”</td></tr>
             <tr><td>Dry-run active</td><td>trigger is detected + logged, nothing is shut down</td></tr>
             <tr><td>Mains returns</td><td>state is reset</td></tr>
           </tbody>
@@ -489,7 +536,7 @@ volumes:
         recreating the container (<code>docker compose pull &amp;&amp; docker compose up
         -d</code>) instead of the in-app uploader, and NTP/timezone are the Docker
         host's/orchestrator's responsibility rather than being set from the wizard — both
-        areas are hidden in the web UI. Everything else (SNMP polling, Proxmox shutdown,
+        areas are hidden in the web UI. Everything else (UPS polling, Proxmox shutdown,
         thresholds, webhook, self-test) is identical.</p>
         <div class="callout info">
           <span>Set <code>TZ</code> on the container. The <b>self-test start time</b> is
@@ -518,11 +565,21 @@ volumes:
 # or directly inside the container:
 systemctl start pve-usv-agent.service</code></pre>
         <h3>UPS unreachable / alarm</h3>
-        <p>Check the SNMP address, version/community or v3 credentials, and the firewall
-        between the appliance and the UPS. “Test SNMP” in the wizard shows the exact cause —
-        unfold <b>Details per SNMP object (OID)</b> to see which object failed and why (see
-        <a href="#snmp">SNMP on the UPS</a>). A communication loss alone never shuts anything
-        down (fail-safe).</p>
+        <p>Check the address, credentials and the firewall between the appliance and the UPS
+        source. “Test UPS” in the wizard shows the exact cause — unfold <b>Details per
+        object</b> to see which object failed and why (see <a href="#snmp">UPS sources</a>).
+        A communication loss alone never shuts anything down (fail-safe).</p>
+        <h3>A threshold never fires</h3>
+        <p>Not every device reports every value. Run “Test UPS”: if the device does not
+        publish the remaining runtime or the charge, the test says so above the object table,
+        and the matching threshold is permanently ineffective. Use “On battery longer than
+        (s)” instead — that timer runs on the appliance's own clock.</p>
+        <h3>NUT: “does not know a UPS with that name” or nothing answers</h3>
+        <p>The UPS name must match the section name in upsd's <code>ups.conf</code>;
+        <code>upsc -l &lt;host&gt;</code> lists the valid names. If nothing answers at all,
+        upsd is most likely listening on localhost only — its <code>LISTEN</code> directive
+        has to cover the interface the appliance connects to, and TCP&nbsp;3493 must be
+        open.</p>
         <h3>SNMPv3 with encryption fails</h3>
         <p>If an authPriv user reports <i>“Ciphering services not available”</i> or the test
         points at missing encryption, the appliance is missing the Python package
@@ -544,6 +601,21 @@ systemctl start pve-usv-agent.service</code></pre>
         <p class="muted">Simplified, user-visible highlights. The full technical changelog
         lives in the <a href="https://github.com/ffind-dev/pve-ups/blob/main/CHANGELOG.md"
         target="_blank" rel="noopener">GitHub repository</a>.</p>
+
+        <div class="cl-ver">3.2.0 <span class="date">2026</span></div>
+        <ul>
+          <li><b>UPS devices without a network card</b> can now be monitored: a UPS entry is
+          read either via SNMP as before, or through a <b>NUT server</b> — which is how USB
+          and serial UPS devices are reached. Both kinds can be mixed in one instance. See
+          <a href="#snmp">UPS sources</a>.</li>
+          <li>PVE-UPS stays a strictly read-only NUT client — no <code>upsmon</code>, no
+          shutdown scripts, no config files. The decision stays in the appliance.</li>
+          <li><b>The UPS test names dead thresholds</b>: if a device reports neither the
+          remaining runtime nor the charge, the test says so instead of leaving a threshold
+          that silently never fires.</li>
+          <li>A NUT server serving stale data (its driver crashed) counts as unreachable —
+          an alarm, never a shutdown, and never mistaken for “on mains”.</li>
+        </ul>
 
         <div class="cl-ver">3.1.0 <span class="date">2026</span></div>
         <ul>

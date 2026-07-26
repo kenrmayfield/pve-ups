@@ -1,6 +1,7 @@
-.git
+# Keep the build context to what the Dockerfile actually copies (app/, pyproject.toml,
+# README.md). The leading-dot wildcard covers .git and any editor/tooling directory.
+.*
 .github
-.claude
 tests
 snmpdata
 scripts
@@ -10,10 +11,7 @@ deploy
 simulator
 *.md
 !README.md
-.gitattributes
-.gitignore
 __pycache__
 *.pyc
 dist
-.venv
 pve_usv.egg-info

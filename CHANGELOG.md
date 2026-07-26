@@ -10,6 +10,52 @@ reads it dynamically. On every release: bump `__version__` **and** add a section
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-07-26
+
+### Added
+- **UPS sources**: a UPS is no longer necessarily an SNMP device. Every UPS entry now has
+  a "Read via" selector, and the second source is a **NUT server** (Network UPS Tools,
+  TCP 3493) — the answer for UPS devices with no network card, i.e. everything attached
+  by USB or a serial cable. Any existing `upsd` works: the UPS server built into a
+  Synology/QNAP/TrueNAS NAS, a Raspberry Pi, an OPNsense box, or a NUT install on a
+  Proxmox host. Configuration is host, port, the UPS name from upsd's `ups.conf`, and
+  optionally a user name and password.
+- PVE-UPS acts strictly as a *read-only* NUT client: it only ever sends `LIST VAR`, never
+  a command, and never runs `upsmon`. NUT is used as a device driver — the shutdown
+  decision, the thresholds and the host policy stay in this appliance, so there are still
+  no config files to write and no shutdown scripting on any host.
+- The UPS test now names the trigger conditions the device cannot feed at all ("This UPS
+  does not report: runtime remaining, battery charge"), because a threshold that can never
+  fire is more dangerous than a visible error. Applies to both source types — plenty of
+  NUT drivers omit `battery.runtime`, and plenty of SNMP cards omit
+  `upsEstimatedMinutesRemaining`.
+- `type` field in each UPS entry of the `/api/status` snapshot, and the dashboard card
+  says which source a UPS is read through.
+- `tests/nutsim.py`, a fake `upsd` for development and tests — the NUT counterpart of
+  snmpsim + `snmpdata/`. Runnable standalone (`python -m tests.nutsim --scenario battery`)
+  to click through the wizard without any UPS hardware.
+
+### Changed
+- `POST /api/test/ups` replaces `POST /api/test/snmp` as the wizard's test endpoint and
+  handles every source type. The old path stays as an alias and behaves identically.
+- Event-log wording and trigger reasons no longer say "SNMP" where they apply to any
+  source ("No response for 3 polls …" instead of "No SNMP response for 3 polls …").
+  The fail-safe behaviour itself is unchanged.
+- The per-object test diagnosis was generalised from "per SNMP object (OID)" to "per
+  object" and gained two outcomes: `missing` (the driver does not publish this variable)
+  and `stale` (upsd answers, but its driver has lost contact with the UPS).
+- Configuration schema: UPS entries carry an explicit `type` (`snmp` or `nut`). Existing
+  configuration files and backups are migrated on load — an entry without `type` is read
+  as SNMP, exactly as before — and the field is written out on the next save.
+
+### Security
+- A NUT server that reports stale data (`ERR DATA-STALE`, `ERR DRIVER-NOT-CONNECTED`) is
+  treated as unreachable rather than as a valid reading. `upsd` keeps serving the last
+  known values when its driver dies, and accepting those would have meant reporting
+  "on mains" through an outage. The same applies when a driver omits `ups.status`
+  entirely: the UPS counts as unreachable (alarm, never a shutdown) instead of silently
+  looking healthy.
+
 ## [3.1.0] - 2026-07-26
 
 ### Added
@@ -118,6 +164,7 @@ keep working).
   needs; a legacy `notifications.smtp` config key is ignored on load and dropped on the
   next save.
 
-[Unreleased]: https://github.com/ffind-dev/pve-ups/compare/v3.1.0...HEAD
+[Unreleased]: https://github.com/ffind-dev/pve-ups/compare/v3.2.0...HEAD
+[3.2.0]: https://github.com/ffind-dev/pve-ups/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/ffind-dev/pve-ups/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/ffind-dev/pve-ups/releases/tag/v3.0.0
