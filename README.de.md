@@ -77,6 +77,45 @@ Danach das Webinterface auf **`http://<container-ip>:8080`** öffnen:
 > Host-Liste als **„Dieser Host"** markieren — er wird dann garantiert zuletzt
 > heruntergefahren.
 
+## Docker (alternative Bereitstellung)
+
+Kein LXC gewünscht? Bei jedem Release wird zusätzlich ein fertiges Image nach
+[`ghcr.io/ffind-dev/pve-ups`](https://github.com/ffind-dev/pve-ups/pkgs/container/pve-ups)
+veröffentlicht:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/ffind-dev/pve-ups/main/docker-compose.example.yml
+mv docker-compose.example.yml docker-compose.yml
+docker compose up -d
+```
+
+Das bindet zwei benannte Volumes ein (`/etc/pve-usv` für die Konfiguration,
+`/var/lib/pve-usv` für Eventlog/Zustand), damit die Daten eine Neuerstellung des
+Containers überstehen. Danach `http://<container-host>:8080` öffnen und wie gewohnt
+den Wizard durchlaufen.
+
+**Der Docker-Modus unterscheidet sich in zwei Punkten vom LXC**, weil es dort keinen
+privilegierten Begleitprozess (kein systemd) im Image gibt:
+- **Keine In-App-Updates.** Der Button „Update-Paket hochladen" ist ausgeblendet;
+  Updates erfolgen durch ein neues Image-Tag
+  (`docker compose pull && docker compose up -d`). Konfiguration und Eventlog bleiben
+  in den Volumes erhalten.
+- **Keine NTP-/Zeitzonen-Verwaltung über den Wizard.** Zeit und Zeitzone liegen in der
+  Verantwortung des Docker-Hosts/Orchestrators — **`TZ` am Container setzen** (die
+  Beispiel-Compose-Datei tut das). Der Selbsttest-Zeitplan gilt in der lokalen Zeit des
+  Containers; ohne `TZ` läuft der Container in UTC.
+
+> **Liegt das eigene Netz innerhalb von `172.17.0.0/16` – `172.31.0.0/16`**, den
+> Standard-Adresspool von Docker *vor* dem Start des Containers verschieben — Docker
+> beansprucht diesen Bereich für seine Bridges, und der Container würde eine USV oder
+> einen Proxmox-Host darin nicht mehr erreichen. In `/etc/docker/daemon.json`:
+> `{"bip":"10.210.0.1/24","default-address-pools":[{"base":"10.211.0.0/16","size":24}]}`,
+> danach `systemctl restart docker`.
+
+Alles Weitere (SNMP-Polling, Proxmox-Shutdown, Schwellwerte, Webhook, Selbsttest)
+funktioniert identisch zur LXC-Bereitstellung. Die LXC-Installation (oben) bleibt der
+primäre, vollständig selbst-aktualisierende Weg.
+
 ## Proxmox-Host anbinden (API-Token)
 
 Die Appliance fährt Hosts über die Proxmox-API herunter — kein Root-SSH, kein Agent auf
@@ -110,7 +149,9 @@ UUID, wird nur dieses eine Mal angezeigt — jetzt kopieren). Beides im Wizard u
 - **Mehrere USVs** pro Instanz mit Host↔USV-Zuordnung und Logik pro Host
   (**UND** = redundante Netzteile, **ODER** = aufgeteilte Last), inkl. Live-Schaubild.
 - **SNMP v1/v2c und v3** (authPriv), RFC-1628-UPS-MIB, nur lesend.
-- **Web-Wizard** für USVs, Hosts, Schwellwerte und Benachrichtigungen — mit Test-Buttons.
+- **Web-Wizard** für USVs, Hosts, Schwellwerte und Benachrichtigungen — mit Test-Buttons;
+  der SNMP-Test schlüsselt sein Ergebnis je RFC-1628-Objekt auf, sodass fehlende OID,
+  falsche Zugangsdaten und blockierter Port auf einen Blick unterscheidbar sind.
 - **Zweisprachige Oberfläche**: Englisch (Standard) und Deutsch, automatisch passend
   zur Browsersprache; eingebautes Benutzerhandbuch (beide Sprachen).
 - **Schwellen-Overrides je USV** zusätzlich zu den globalen Standardwerten.
@@ -119,8 +160,9 @@ UUID, wird nur dieses eine Mal angezeigt — jetzt kopieren). Beides im Wizard u
 - **REST-Status** (`/api/status`, `/api/health`) — lesend, ohne Auth, ohne Secrets;
   Ereignisprotokoll der letzten 48 h inklusive. Ereignis-/Webhook-Texte sind einheitlich
   englisch.
-- **Konfigurations-Export/-Import**, NTP/Zeitzone, täglicher Proxmox-Selbsttest,
-  In-Place-**Updates per Paket-Upload** im Webinterface.
+- **Konfigurations-Export/-Import**, NTP/Zeitzone, regelmäßiger Proxmox-Selbsttest
+  (Startzeit plus Intervall von 15 min bis 24 h), In-Place-**Updates per Paket-Upload**
+  im Webinterface.
 
 ## Sicherheitsmodell
 
@@ -158,6 +200,8 @@ Das Release-Paket (`pve-usv-<version>.tar.gz`) von der
 Webinterface unter **Update** hochladen. Die Konfiguration bleibt erhalten; der Dienst
 startet automatisch neu. Das Update von 2.x funktioniert genauso (die zwei
 Verhaltensänderungen stehen im Handbuch).
+Läuft die Appliance in Docker? Siehe [Docker](#docker-alternative-bereitstellung) oben —
+dort erfolgen Updates über ein neues Image-Tag.
 
 > **Hinweis:** Der Produktname ist PVE-UPS, technisch heißen Dienst und Pfade aber
 > `pve-usv` (`systemctl status pve-usv`, `/etc/pve-usv/config.yaml`,
@@ -182,6 +226,9 @@ PVE_USV_CONFIG=./dev-config.yaml PVE_USV_DB=./dev-events.db python -m app.main
 
 - Nur Standalone-Hosts (kein Cluster-/HA-Manager-Eingriff) — mögliche spätere Erweiterung.
 - Liest ausschließlich die Standard-RFC-1628-UPS-MIB (herstellerunabhängig).
+- In der optionalen Docker-Bereitstellung sind In-App-Updates und NTP-/Zeitzonen-Verwaltung
+  nicht verfügbar (siehe [Docker](#docker-alternative-bereitstellung)) — alles Weitere ist
+  identisch.
 
 ## Lizenz
 

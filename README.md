@@ -73,6 +73,43 @@ Then open the web UI at **`http://<container-ip>:8080`**:
 > The LXC typically runs on one of the protected hosts. Mark that host as **"This host"**
 > in the host list — it is then guaranteed to shut down last.
 
+## Docker (alternative deployment)
+
+Prefer not to run an LXC? A prebuilt image is published on every release to
+[`ghcr.io/ffind-dev/pve-ups`](https://github.com/ffind-dev/pve-ups/pkgs/container/pve-ups):
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/ffind-dev/pve-ups/main/docker-compose.example.yml
+mv docker-compose.example.yml docker-compose.yml
+docker compose up -d
+```
+
+This mounts two named volumes (`/etc/pve-usv` for the config, `/var/lib/pve-usv` for the
+event log/state) so data survives container recreation. Open
+`http://<container-host>:8080` and run through the wizard as usual.
+
+**Docker mode has two differences from the LXC deployment**, because there is no
+privileged companion process (no systemd) inside the image:
+- **No in-app updates.** The "Upload update package" button is hidden; update by
+  pulling a new image tag and recreating the container
+  (`docker compose pull && docker compose up -d`). Config and event log persist in the
+  volumes.
+- **No NTP/timezone management from the wizard.** Time and timezone are the
+  Docker host's/orchestrator's responsibility — **set `TZ` on the container** (the example
+  Compose file does). The self-test schedule runs in the container's local time, and
+  without `TZ` the container runs in UTC.
+
+> **If your network lies within `172.17.0.0/16` – `172.31.0.0/16`**, move Docker's default
+> address pool *before* starting the container — Docker claims that range for its bridges,
+> and the container would no longer reach a UPS or Proxmox host in it. In
+> `/etc/docker/daemon.json`:
+> `{"bip":"10.210.0.1/24","default-address-pools":[{"base":"10.211.0.0/16","size":24}]}`,
+> then `systemctl restart docker`.
+
+Everything else (SNMP polling, Proxmox shutdown, thresholds, webhook, self-test) works
+identically to the LXC deployment. The LXC install (above) remains the primary, fully
+self-updating path.
+
 ## Connecting a Proxmox host (API token)
 
 The appliance shuts hosts down through the Proxmox API — no root SSH, no agent on the
@@ -105,15 +142,18 @@ shown only this once — copy it now). Enter both in the wizard under **Proxmox 
 - **Multiple UPS devices** per instance with host↔UPS mapping and per-host logic
   (**AND** = redundant power supplies, **OR** = split load), including a live feed diagram.
 - **SNMP v1/v2c and v3** (authPriv), RFC 1628 UPS MIB, read-only.
-- **Web wizard** for UPS devices, hosts, thresholds and notifications — with test buttons.
+- **Web wizard** for UPS devices, hosts, thresholds and notifications — with test buttons;
+  the SNMP test breaks its result down per RFC 1628 object, so a missing OID, wrong
+  credentials and a blocked port are told apart at a glance.
 - **Bilingual UI**: English (default) and German, picked automatically from the browser
   language; user manual built in (both languages).
 - Per-UPS **threshold overrides** on top of the global defaults.
 - **Webhook notifications** (HTTP POST with subject/body/status JSON) on notable events.
 - **REST status** (`/api/status`, `/api/health`) — read-only, no auth, no secrets;
   event log of the last 48 h included. Event/webhook texts are uniformly English.
-- **Config export/import**, NTP/timezone setup, daily Proxmox connectivity self-test,
-  in-place **updates via package upload** in the web UI.
+- **Config export/import**, NTP/timezone setup, scheduled Proxmox connectivity self-test
+  (start time plus an interval from 15 min to 24 h), in-place **updates via package
+  upload** in the web UI.
 
 ## Safety model
 
@@ -148,6 +188,8 @@ Download the release asset (`pve-usv-<version>.tar.gz`) from the
 [releases page](https://github.com/ffind-dev/pve-ups/releases) and upload it in the web UI
 under **Update**. The configuration is preserved; the service restarts automatically.
 Updating from 2.x works the same way (see the manual for the two behaviour changes).
+Running in Docker instead? See [Docker](#docker-alternative-deployment) above —
+updates there work by pulling a new image tag.
 
 > **Note:** the product name is PVE-UPS, but service and paths are technically named
 > `pve-usv` (`systemctl status pve-usv`, `/etc/pve-usv/config.yaml`,
@@ -172,6 +214,8 @@ PVE_USV_CONFIG=./dev-config.yaml PVE_USV_DB=./dev-events.db python -m app.main
 
 - Standalone hosts only (no cluster/HA-manager interaction) — a possible future extension.
 - Reads exclusively the standard RFC 1628 UPS MIB (vendor-independent).
+- In the optional Docker deployment, in-app updates and NTP/timezone management are not
+  available (see [Docker](#docker-alternative-deployment)) — everything else is identical.
 
 ## License
 

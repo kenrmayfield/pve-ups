@@ -167,9 +167,14 @@
   <header class="topbar">
     <span class="brand">
       <svg class="mark icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5v6c0 5 3.4 8.5 8 11 4.6-2.5 8-6 8-11V5l-8-3z"/></svg>
-      PVE-UPS <span class="sub">User Manual · v3.0.0</span>
+      PVE-UPS <span class="sub">User Manual · v3.1.0</span>
     </span>
     <span class="spacer"></span>
+    <a class="btn" href="https://github.com/ffind-dev/pve-ups" target="_blank"
+       rel="noopener" title="Project on GitHub">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.9a3.4 3.4 0 0 0-.9-2.6c3-.3 6.2-1.5 6.2-6.7A5.2 5.2 0 0 0 20 5.3a4.9 4.9 0 0 0-.1-3.6s-1.1-.3-3.6 1.4a12.3 12.3 0 0 0-6.6 0C7.2 1.4 6.1 1.7 6.1 1.7A4.9 4.9 0 0 0 6 5.3 5.2 5.2 0 0 0 4.6 8.8c0 5.2 3.2 6.4 6.2 6.7a3.4 3.4 0 0 0-.9 2.6V22"/></svg>
+      <span>GitHub</span>
+    </a>
     <button id="themeBtn" class="btn" type="button" title="Toggle theme">
       <svg class="icon" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
       <span id="themeLbl">Auto</span>
@@ -292,6 +297,24 @@ pveum user token add ups@pve shutdown --privsep 0</code></pre>
         or <i>SNMPv3</i>), enable access and grant the appliance IP <b>read access</b>. Only
         the standard RFC 1628 UPS MIB is read (no write access). The wizard test immediately
         shows the source (mains/battery), battery status, remaining runtime and charge.</p>
+        <h3>Reading the test result</h3>
+        <p>Below the result line, “Test SNMP” offers <b>Details per SNMP object (OID)</b> —
+        every object queried individually, with its value or the reason it is missing. It
+        unfolds on its own whenever something is wrong, which separates the three cases that
+        otherwise look identical:</p>
+        <ul>
+          <li><b>Nothing answers</b> (every line an error): address, port, community or v3
+          credentials are wrong, or a firewall blocks UDP&nbsp;161.</li>
+          <li><b>Some objects answer, others say <code>noSuchObject</code> /
+          <code>noSuchInstance</code></b>: the UPS simply does not implement those objects.
+          Source and battery status keep working; only the thresholds that need a missing
+          value stay ineffective (e.g. “remaining runtime below” without
+          <code>upsEstimatedMinutesRemaining</code>).</li>
+          <li><b><code>noSuchName</code> under SNMPv1</b>: the object is missing <i>and</i>
+          v1 aborts a multi-object query as soon as one object is absent — the regular poll
+          then fails completely even though the other values are readable. Switch the UPS to
+          <b>v2c</b> if it supports it.</li>
+        </ul>
       </section>
 
       <section class="card" id="logik">
@@ -414,15 +437,75 @@ curl -s http://&lt;container-ip&gt;:8080/api/status \
         export/import the configuration, set the NTP server and timezone, and view/clear
         the event log.</p>
         <p class="muted">Note: the timezone (System section, e.g. <code>Europe/Berlin</code>)
-        should be set, otherwise the container runs in UTC. The <b>self-test hour</b> of the
-        daily Proxmox connectivity check is interpreted in this local time; after setting the
-        timezone the service restarts briefly.</p>
+        should be set, otherwise the container runs in UTC. The <b>self-test start time</b>
+        is interpreted in this local time; after setting the timezone the service restarts
+        briefly.</p>
+        <h3>Self-test of the Proxmox connection</h3>
+        <p>The appliance checks on its own whether the API token and the
+        <code>Sys.PowerMgmt</code> privilege still work per host — so an expired or revoked
+        credential surfaces long before an outage needs it. Two settings in the
+        <i>System</i> section control it: a <b>start time</b> (full hour) and an
+        <b>interval</b> from 15 minutes up to 24 hours. Both together define fixed times of
+        day: start 09:00 with a 6-hour interval means 09:00, 15:00, 21:00 and 03:00. The
+        default is daily.</p>
+        <p>A failed self-test is always logged and notified. A successful one is written to
+        the event log at most once a day (and whenever it recovers from a failure), so a
+        short interval does not bury the event log. While a UPS is on battery the self-test
+        is skipped entirely — during an outage the countdown has priority. A restart does
+        not repeat a self-test that already ran in the current slot.</p>
         <h3>Updating from version 2.x to 3.x</h3>
         <p>Download the current release package (<code>pve-usv-&lt;version&gt;.tar.gz</code>)
-        from the GitHub releases page and upload it in the web UI under “Update” — the
+        from the <a href="https://github.com/ffind-dev/pve-ups/releases" target="_blank"
+        rel="noopener">GitHub releases page</a> and upload it in the web UI under “Update” — the
         configuration is fully preserved. Two behaviour changes: e-mail notifications are
         gone (a previously configured SMTP entry is removed automatically on the next save;
         the webhook remains), and event/webhook texts are English as of 3.0.0.</p>
+        <h3 id="docker">Docker deployment</h3>
+        <p>As an alternative to the LXC install, a prebuilt image is published on every
+        release to <a href="https://github.com/ffind-dev/pve-ups/pkgs/container/pve-ups"
+        target="_blank" rel="noopener"><code>ghcr.io/ffind-dev/pve-ups</code></a>. A
+        ready-made <code>docker-compose.example.yml</code> is in the
+        <a href="https://github.com/ffind-dev/pve-ups" target="_blank"
+        rel="noopener">repository</a>; the essentials are:</p>
+<pre><code>services:
+  pve-ups:
+    image: ghcr.io/ffind-dev/pve-ups:latest
+    container_name: pve-ups
+    restart: unless-stopped
+    ports: ["8080:8080"]
+    environment:
+      - TZ=Europe/Berlin
+    volumes:
+      - pve-ups-config:/etc/pve-usv    # config.yaml (secrets, 0600)
+      - pve-ups-data:/var/lib/pve-usv  # events.db + engine state
+volumes:
+  pve-ups-config:
+  pve-ups-data:</code></pre>
+        <p>Then open <code>http://&lt;docker-host&gt;:8080</code> and run through the same
+        wizard as with the LXC. Configuration and event log persist via the two mounted
+        volumes, so <code>docker compose down</code> does not lose anything.</p>
+        <p>Because there is no privileged companion process (no systemd) in the image, two
+        things work differently there: updates are applied by pulling a new image tag and
+        recreating the container (<code>docker compose pull &amp;&amp; docker compose up
+        -d</code>) instead of the in-app uploader, and NTP/timezone are the Docker
+        host's/orchestrator's responsibility rather than being set from the wizard — both
+        areas are hidden in the web UI. Everything else (SNMP polling, Proxmox shutdown,
+        thresholds, webhook, self-test) is identical.</p>
+        <div class="callout info">
+          <span>Set <code>TZ</code> on the container. The <b>self-test start time</b> is
+          interpreted in the container's local time, and without <code>TZ</code> the
+          container runs in UTC — the timezone cannot be set from the web UI in Docker
+          mode.</span>
+        </div>
+        <div class="callout warn">
+          <span>If your own network lies within <code>172.17.0.0/16</code> –
+          <code>172.31.0.0/16</code>, move Docker's default address pool <b>before</b>
+          starting the container — Docker claims that range for its bridges, and the
+          container would then no longer reach a UPS or a Proxmox host in it. In
+          <code>/etc/docker/daemon.json</code>, e.g.
+          <code>{"bip":"10.210.0.1/24","default-address-pools":[{"base":"10.211.0.0/16","size":24}]}</code>,
+          then <code>systemctl restart docker</code>.</span>
+        </div>
       </section>
 
       <section class="card" id="faq">
@@ -436,8 +519,19 @@ curl -s http://&lt;container-ip&gt;:8080/api/status \
 systemctl start pve-usv-agent.service</code></pre>
         <h3>UPS unreachable / alarm</h3>
         <p>Check the SNMP address, version/community or v3 credentials, and the firewall
-        between the appliance and the UPS. “Test SNMP” in the wizard shows the exact cause.
-        A communication loss alone never shuts anything down (fail-safe).</p>
+        between the appliance and the UPS. “Test SNMP” in the wizard shows the exact cause —
+        unfold <b>Details per SNMP object (OID)</b> to see which object failed and why (see
+        <a href="#snmp">SNMP on the UPS</a>). A communication loss alone never shuts anything
+        down (fail-safe).</p>
+        <h3>SNMPv3 with encryption fails</h3>
+        <p>If an authPriv user reports <i>“Ciphering services not available”</i> or the test
+        points at missing encryption, the appliance is missing the Python package
+        <code>cryptography</code>, which provides the DES/AES ciphers. Versions up to 3.0.0
+        did not install it. <b>Updating the appliance fixes this</b> — the package comes
+        along automatically. Two things worth knowing: it affects every privacy protocol,
+        so switching from DES to AES does not help, and <b>authNoPriv</b> (authentication
+        MD5/SHA, privacy “none”) keeps working in the meantime, because authentication does
+        not need those ciphers.</p>
         <h3>Internal names: <code>pve-usv</code></h3>
         <p>The product name is PVE-UPS, but the service and paths are technically still
         called <code>pve-usv</code> — e.g. <code>systemctl status pve-usv</code>,
@@ -448,7 +542,24 @@ systemctl start pve-usv-agent.service</code></pre>
       <section class="card" id="changelog">
         <h2 class="sec"><span class="n">12</span> Changelog (highlights)</h2>
         <p class="muted">Simplified, user-visible highlights. The full technical changelog
-        lives in the GitHub repository.</p>
+        lives in the <a href="https://github.com/ffind-dev/pve-ups/blob/main/CHANGELOG.md"
+        target="_blank" rel="noopener">GitHub repository</a>.</p>
+
+        <div class="cl-ver">3.1.0 <span class="date">2026</span></div>
+        <ul>
+          <li><b>SNMPv3 with encryption now works.</b> An authPriv user failed with
+          “Ciphering services not available” up to and including 3.0.0 — a missing
+          dependency, which the update installs along the way. See
+          <a href="#faq">Troubleshooting</a>.</li>
+          <li><b>Docker deployment</b> as an alternative to the LXC: a prebuilt image is
+          published with every release. See <a href="#docker">Docker deployment</a>.</li>
+          <li><b>SNMP test with details per object</b>: each RFC 1628 object with its value
+          or the reason it is missing, so wrong credentials, a blocked port and an
+          incomplete UPS are told apart at a glance.</li>
+          <li><b>Self-test with an interval</b>: the time of day becomes a start time, with
+          a repeat from 15 minutes up to 24 hours. Existing installations keep their daily
+          cadence.</li>
+        </ul>
 
         <div class="cl-ver">3.0.0 <span class="date">2026</span></div>
         <ul>
@@ -466,7 +577,13 @@ systemctl start pve-usv-agent.service</code></pre>
     </main>
   </div>
 
-  <footer>© 2026 Florian Finder · PVE-UPS</footer>
+  <footer>
+    © 2026 Florian Finder · PVE-UPS ·
+    <a href="https://github.com/ffind-dev/pve-ups" target="_blank" rel="noopener">Project on GitHub</a> ·
+    <a href="https://github.com/ffind-dev/pve-ups/releases" target="_blank" rel="noopener">Releases</a> ·
+    <a href="https://github.com/ffind-dev/pve-ups/issues" target="_blank" rel="noopener">Report an issue</a> ·
+    <a href="https://github.com/ffind-dev/pve-ups/security/policy" target="_blank" rel="noopener">Report a vulnerability</a>
+  </footer>
 
   <script>
     // Reuse the app's theme (same localStorage key as app.js).
