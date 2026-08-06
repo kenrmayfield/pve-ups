@@ -175,6 +175,11 @@ function upsCardHtml(u) {
   const gw = pct === null ? "0%" : Math.max(0, Math.min(100, pct)) + "%";
   const gcls = pct === null ? "" : pct <= 30 ? " crit" : pct <= 60 ? " warn" : "";
   const model = [u.manufacturer, u.model].filter(Boolean).join(" ");
+  // Name the MIB the poll settled on: with "auto" the user cannot otherwise tell whether
+  // the UPS is being read on the standard or on its vendor MIB.
+  const via = u.mib
+    ? t("ups.viaMib", { src: t("src." + (u.type || "snmp")), mib: t("mib." + u.mib) })
+    : t("ups.via", { src: t("src." + (u.type || "snmp")) });
   const trig = u.triggered
     ? `<div class="stat"><span>${esc(t("ups.trigger"))}</span><b class="crit-text">${esc(u.trigger_reason || t("ups.triggered"))}</b></div>` : "";
   const cd = u.countdown_remaining_s != null
@@ -183,7 +188,7 @@ function upsCardHtml(u) {
     ? `<div class="stat"><span>${esc(t("ups.commLossIn"))}</span><b>${u.comm_loss_remaining_s} s</b></div>` : "";
   return `<div class="card ups-card is-${upsStatusCls(u)}">
     <div class="card-h"><h3><svg class="icon batt-ic"><use href="#i-battery"></use></svg>${esc(u.name)}</h3>${statIc}</div>
-    <div class="hero-meta"><span>${esc(t("ups.source"))} ${src}</span><span class="faint">·</span><span>${esc(model) || "–"}</span><span class="faint">·</span><span class="muted">${esc(t("ups.via", { src: t("src." + (u.type || "snmp")) }))}</span></div>
+    <div class="hero-meta"><span>${esc(t("ups.source"))} ${src}</span><span class="faint">·</span><span>${esc(model) || "–"}</span><span class="faint">·</span><span class="muted">${esc(via)}</span></div>
     <div class="metric" style="margin-top:8px">
       <span class="k">${esc(t("ups.charge"))} ${pct === null ? "–" : pct + " %"}</span>
       <div class="gauge"><div class="gauge-fill${gcls}" style="width:${gw}"></div></div>
@@ -318,6 +323,8 @@ const AUTH_PROTOS = [["none", t("proto.none")], ["md5", "MD5"], ["sha", "SHA"], 
 const PRIV_PROTOS = [["none", t("proto.none")], ["des", "DES"], ["aes", "AES-128"], ["aes256", "AES-256"]];
 // Must match config.UpsSourceType; tests/test_i18n.py keeps the labels in both dictionaries.
 const SOURCE_TYPES = [["snmp", t("src.snmp")], ["nut", t("src.nut")]];
+// Must match config.SnmpMib; tests/test_i18n.py keeps the labels in both dictionaries.
+const SNMP_MIBS = [["auto", t("mib.auto")], ["rfc1628", t("mib.rfc1628")], ["apc", t("mib.apc")]];
 const DEFAULT_PORTS = { snmp: 161, nut: 3493 };
 const TRISTATE = [["", t("tristate.global")], ["on", t("tristate.on")], ["off", t("tristate.off")]];
 const opts = (list, val) => list.map(([v, l]) => `<option value="${v}" ${v === val ? "selected" : ""}>${l}</option>`).join("");
@@ -367,6 +374,7 @@ function addUpsCard(u, open) {
     <div class="u_snmp">
       <div class="row">
         <label title="${esc(t("cfg.versionTitle"))}">${esc(t("cfg.version"))} <select class="u_version">${opts([["v1", "v1"], ["v2c", "v2c"], ["v3", "v3"]], u.version || "v2c")}</select></label>
+        <label title="${esc(t("cfg.mibTitle"))}">${esc(t("cfg.mib"))} <select class="u_mib">${opts(SNMP_MIBS, u.mib || "auto")}</select></label>
       </div>
       <div class="u_v2c">
         <label title="${esc(t("cfg.communityTitle"))}">${esc(t("cfg.community"))} <input class="u_community" placeholder="${esc(commPh)}" /></label>
@@ -483,6 +491,7 @@ function upsFromCard(div) {
   const comm = q(".u_community").value, ap = q(".u_v3_auth_pass").value, pp = q(".u_v3_priv_pass").value;
   return Object.assign(base, {
     version: q(".u_version").value,
+    mib: q(".u_mib").value,
     community: comm === "" ? SECRET_PLACEHOLDER : comm,
     v3_user: q(".u_v3_user").value,
     v3_auth_proto: q(".u_v3_auth_proto").value,
@@ -503,7 +512,8 @@ function currentUpsList() {
 function renderProbe(p) {
   const lines = (p.entries || []).map((e) => {
     const st = t("probe.st." + e.status, { err: e.error || "" });
-    return e.name.padEnd(30) + (e.oid || "").padEnd(e.oid ? 24 : 0) + st
+    // 32 fits the longest vendor OID (APC PowerNet is 29 chars) plus a gap.
+    return e.name.padEnd(32) + (e.oid || "").padEnd(e.oid ? 32 : 0) + st
       + (e.status === "ok" ? " = " + e.value : "");
   });
   const head = [t("probe.head", { ok: p.ok_count, n: p.total })];

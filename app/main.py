@@ -494,6 +494,7 @@ async def api_test_ups(incoming: dict):
             "summary": diag.summary,
             "ok_count": diag.ok_count,
             "total": diag.total,
+            "mib": diag.mib,
             "entries": [asdict(e) for e in diag.entries],
             "missing_triggers": diag.missing_triggers,
         },

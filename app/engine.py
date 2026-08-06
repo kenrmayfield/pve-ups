@@ -802,6 +802,9 @@ class Engine:
             "id": u.id,
             "name": u.label,
             "type": getattr(u, "type", "snmp"),
+            # Which MIB the last poll actually read ("" until the first answer, and for
+            # sources that have no MIB). Diagnostics only — "auto" is otherwise invisible.
+            "mib": st.mib,
             "reachable": st.reachable,
             "manufacturer": st.manufacturer,
             "model": st.model,

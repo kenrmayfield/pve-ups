@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="150" viewBox="0 0 220 150" fill="none">
+  <g transform="translate(78 4)"><rect x="8" y="16" width="34" height="8" rx="4" fill="#5b6169"></rect><rect x="8" y="30" width="26" height="8" rx="4" fill="#40464d"></rect><rect x="8" y="44" width="18" height="8" rx="4" fill="#2b3037"></rect><path d="M52 14 L40 32 H47 L43 50 L57 28 H49 Z" fill="#E37222"></path></g>
+  <text x="110" y="104" text-anchor="middle" font-family="&#39;Space Grotesk&#39;,&#39;Helvetica Neue&#39;,Arial,sans-serif" font-size="32" font-weight="700" letter-spacing="0.3">
+    <tspan fill="#f4f2ec">PVE</tspan><tspan fill="#E37222">·</tspan><tspan fill="#f4f2ec">UPS</tspan>
+  </text>
+  <text x="110" y="124" text-anchor="middle" font-family="&#39;IBM Plex Mono&#39;,&#39;SFMono-Regular&#39;,monospace" font-size="10" font-weight="500" letter-spacing="2.4" fill="#8b8f94">SHUTDOWN APPLIANCE</text>
+</svg>

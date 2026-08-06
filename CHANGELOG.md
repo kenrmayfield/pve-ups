@@ -10,6 +10,28 @@ reads it dynamically. On every release: bump `__version__` **and** add a section
 
 ## [Unreleased]
 
+## [3.3.0] - 2026-08-06
+
+### Added
+- **Vendor MIB support, starting with APC PowerNet.** An SNMP UPS is no longer read only
+  through RFC 1628. Every SNMP UPS has a new **MIB** setting — `Automatic` (default),
+  `RFC 1628 (standard)` or `APC PowerNet` — and the poller carries a table-driven profile
+  per MIB, so further vendors are a table rather than new code.
+- `Automatic` needs no configuration and is what existing UPS entries get on update: the
+  regular poll carries the vendor anchor object alongside the standard ones, and the UPS
+  is read on the vendor MIB as soon as it answers there. Under SNMPv1, where a single
+  missing object aborts the whole request, the poller retries on the vendor MIB instead.
+- This makes APC cards work that could not be used before: Schneider only supports
+  RFC 1628 on Network Management Card 2 (AP9630/AP9631/AP9635) from firmware sumx/sy
+  v5.1.7 on, while the older NMC1 cards (AP9617/AP9618/AP9619) speak PowerNet only.
+- Cards that support both are now more accurate as well. `upsAdvBatteryRunTimeRemaining`
+  is reported in hundredths of a second instead of whole minutes, and PowerNet reports a
+  self-test (`onBatteryTest`) as its own state — RFC 1628 cannot tell one apart from a
+  real outage.
+- The UPS test walks both MIBs in `Automatic` mode and says which one it settled on and
+  why, so "nothing works" becomes "this card has no RFC 1628, but PowerNet answers every
+  object". The dashboard names the MIB a UPS is being read on.
+
 ## [3.2.0] - 2026-07-26
 
 ### Added
@@ -164,7 +186,8 @@ keep working).
   needs; a legacy `notifications.smtp` config key is ignored on load and dropped on the
   next save.
 
-[Unreleased]: https://github.com/ffind-dev/pve-ups/compare/v3.2.0...HEAD
+[Unreleased]: https://github.com/ffind-dev/pve-ups/compare/v3.3.0...HEAD
+[3.3.0]: https://github.com/ffind-dev/pve-ups/compare/v3.2.0...v3.3.0
 [3.2.0]: https://github.com/ffind-dev/pve-ups/compare/v3.1.0...v3.2.0
 [3.1.0]: https://github.com/ffind-dev/pve-ups/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/ffind-dev/pve-ups/releases/tag/v3.0.0

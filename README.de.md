@@ -5,9 +5,9 @@ Konfigurationsdateien.**
 
 *English version: [README.md](README.md)*
 
-PVE-UPS überwacht eine oder mehrere USVs — **mit SNMP-Netzwerkkarte (Standard RFC 1628)**
-oder **über einen NUT-Server**, worüber USB- und seriell angeschlossene USVs gelesen
-werden — und fährt bei Stromausfall einen oder mehrere **Standalone-Proxmox-VE-Hosts**
+PVE-UPS überwacht eine oder mehrere USVs — **mit SNMP-Netzwerkkarte (Standard RFC 1628
+oder Hersteller-MIB wie APC PowerNet)** oder **über einen NUT-Server**, worüber USB- und
+seriell angeschlossene USVs gelesen werden — und fährt bei Stromausfall einen oder mehrere **Standalone-Proxmox-VE-Hosts**
 geordnet herunter. Der moderne Ersatz für herstellergebundene Appliances wie APC
 PowerChute Network Shutdown. Die komplette Einrichtung läuft über einen **Web-Wizard**;
 Monitoring gibt es als **REST/JSON**.
@@ -27,9 +27,10 @@ NUT als *Treiber*, statt es zu ersetzen:
 - **Keine Agenten auf den Hosts** — der Shutdown läuft über die Proxmox-API mit einem
   dedizierten, widerrufbaren **API-Token**, das nur das Recht `Sys.PowerMgmt` besitzt.
   Nirgendwo Root-SSH.
-- **Herstellerneutral** — die Standard-RFC-1628-UPS-MIB per SNMP v1/v2c/v3 (reine
-  Python-Implementierung, kein net-snmp) oder jeder vorhandene NUT-Server als
-  nur-lesender Client.
+- **Herstellerneutral, aber nicht blauäugig** — die Standard-RFC-1628-UPS-MIB per
+  SNMP v1/v2c/v3 (reine Python-Implementierung, kein net-snmp), mit automatischem Wechsel
+  auf eine Hersteller-MIB, wo der Standard nicht reicht (APC PowerNet) — oder jeder
+  vorhandene NUT-Server als nur-lesender Client.
 - **NUT bleibt Treiber, nie das Gehirn** — PVE-UPS liest von `upsd` ausschließlich
   Variablen. Kein `upsmon`, kein `upssched`, keine Shutdown-Skripte: Schwellen,
   Host-Logik und Entscheidung bleiben in der Appliance, wo man sie sieht.
@@ -155,7 +156,11 @@ UUID, wird nur dieses eine Mal angezeigt — jetzt kopieren). Beides im Wizard u
 - **Mehrere USVs** pro Instanz mit Host↔USV-Zuordnung und Logik pro Host
   (**UND** = redundante Netzteile, **ODER** = aufgeteilte Last), inkl. Live-Schaubild.
 - **Zwei USV-Quellen**, in einer Instanz frei mischbar:
-  - **SNMP v1/v2c und v3** (authPriv), RFC-1628-UPS-MIB, nur lesend.
+  - **SNMP v1/v2c und v3** (authPriv), nur lesend. Liest die Standard-RFC-1628-UPS-MIB
+    oder eine **Hersteller-MIB** — derzeit **APC PowerNet**, womit APC-Karten
+    funktionieren, die RFC 1628 nur teilweise (NMC2 unter Firmware sumx/sy v5.1.7) oder gar
+    nicht (NMC1: AP9617/AP9618/AP9619) implementieren. Wird je USV automatisch erkannt und
+    lässt sich von Hand festlegen.
   - **NUT-Server** (TCP 3493) als nur-lesender Client — für USVs ohne Netzwerkkarte.
     Funktioniert mit dem eingebauten USV-Server einer Synology/QNAP/TrueNAS, einem
     Raspberry Pi, OPNsense oder einem NUT auf einem Proxmox-Host.
@@ -238,15 +243,19 @@ PVE_USV_CONFIG=./dev-config.yaml PVE_USV_DB=./dev-events.db python -m app.main
 # UI: http://127.0.0.1:8080
 #   SNMP: Host 127.0.0.1, Port 1161, Community "public"  -> Netzbetrieb (100 %)
 #                                    Community "battery" -> Stromausfall -> Auslöser greifen
+#         Die APC-Snapshots enthalten nur PowerNet-OIDs, also eine Karte ohne RFC 1628:
+#                                    Community "apc"         -> Netzbetrieb, MIB wird APC
+#                                    Community "apc-battery" -> Stromausfall auf der APC-MIB
 #   NUT:  Host 127.0.0.1, Port 3493, USV-Name "ups"
 ```
 
 ## Grenzen / Annahmen
 
 - Nur Standalone-Hosts (kein Cluster-/HA-Manager-Eingriff) — mögliche spätere Erweiterung.
-- Liest entweder die Standard-RFC-1628-UPS-MIB oder die Variablen eines NUT-Servers —
-  beides herstellerunabhängig. Die Appliance selbst spricht kein USB/seriell; eine lokal
-  angeschlossene USV wird über einen NUT-Server erreicht.
+- Liest die Standard-RFC-1628-UPS-MIB, die APC-PowerNet-MIB oder die Variablen eines
+  NUT-Servers. Weitere Hersteller-MIBs sind noch nicht umgesetzt — ein Gerät außerhalb
+  davon braucht entweder RFC 1628 oder einen NUT-Treiber. Die Appliance selbst spricht kein
+  USB/seriell; eine lokal angeschlossene USV wird über einen NUT-Server erreicht.
 - Das NUT-Protokoll ist unverschlüsselt. Es gehört in ein vertrauenswürdiges Netz — oder
   auf einen `upsd`, der nur auf dem Loopback-Interface derselben Maschine lauscht.
 - In der optionalen Docker-Bereitstellung sind In-App-Updates und NTP-/Zeitzonen-Verwaltung
@@ -256,3 +265,5 @@ PVE_USV_CONFIG=./dev-config.yaml PVE_USV_DB=./dev-events.db python -m app.main
 ## Lizenz
 
 MIT — Copyright © 2026 Florian Finder. Siehe [LICENSE](LICENSE).
+
+<sub>Entwickelt mit KI-Unterstützung.</sub>

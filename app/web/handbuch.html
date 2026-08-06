@@ -167,7 +167,7 @@
   <header class="topbar">
     <span class="brand">
       <svg class="mark icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5v6c0 5 3.4 8.5 8 11 4.6-2.5 8-6 8-11V5l-8-3z"/></svg>
-      PVE-UPS <span class="sub">Benutzerhandbuch · v3.2.0</span>
+      PVE-UPS <span class="sub">Benutzerhandbuch · v3.3.0</span>
     </span>
     <span class="spacer"></span>
     <a class="btn" href="https://github.com/ffind-dev/pve-ups" target="_blank"
@@ -219,8 +219,9 @@
         <h3>Kernfunktionen</h3>
         <ul>
           <li>Überwachung <b>einer oder mehrerer USVs</b> — mit SNMP-Netzwerkkarte
-          (Standard RFC&nbsp;1628, <b>SNMP v1/v2c/v3</b>, reine Python-Implementierung) oder
-          über einen <b>NUT-Server</b>, worüber USB- und seriell angeschlossene USVs gelesen
+          (Standard RFC&nbsp;1628 <i>oder</i> Hersteller-MIB wie APC PowerNet,
+          <b>SNMP v1/v2c/v3</b>, reine Python-Implementierung) oder über einen
+          <b>NUT-Server</b>, worüber USB- und seriell angeschlossene USVs gelesen
           werden.</li>
           <li>Geordneter Shutdown der Hosts über ein <b>Proxmox API-Token</b> (Recht
           <code>Sys.PowerMgmt</code>) — kein Root-SSH nötig.</li>
@@ -245,7 +246,9 @@
           <li>Eine oder mehrere USVs, auf eine von zwei Arten erreichbar:
             <ul>
               <li>mit <b>SNMP-Netzwerkkarte</b>, die die Standard-<b>RFC-1628-UPS-MIB</b>
-              bereitstellt (herstellerunabhängig), oder</li>
+              (herstellerunabhängig) oder eine unterstützte <b>Hersteller-MIB</b>
+              bereitstellt — APC PowerNet, womit auch APC-Karten ohne RFC 1628 erfasst sind
+              (siehe <a href="#snmp">Abschnitt 5</a>), oder</li>
               <li>per <b>USB- oder seriellem Kabel</b> an einer Maschine, auf der ein
               <b>NUT-Server</b> (<code>upsd</code>) läuft — siehe Abschnitt 5.</li>
             </ul>
@@ -310,8 +313,31 @@ pveum user token add ups@pve shutdown --privsep 0</code></pre>
         <h3>SNMP (USV mit Netzwerkkarte)</h3>
         <p>In der Weboberfläche der USV-Netzwerkkarte (meist unter <i>Network → SNMPv1</i>
         bzw. <i>SNMPv3</i>) den Zugriff aktivieren und der Appliance-IP <b>Lesezugriff</b>
-        geben. Es wird nur die Standard-RFC-1628-UPS-MIB gelesen (kein Schreibzugriff).
-        Standardport 161/UDP.</p>
+        geben. Es wird nie etwas geschrieben. Standardport 161/UDP.</p>
+
+        <h3>Welche MIB gelesen wird</h3>
+        <p>Jede SNMP-USV hat eine Einstellung <b>MIB</b>. Sie entscheidet, welcher Satz an
+        Objekten abgefragt wird — die Werte selbst, die Schwellwerte und alles Weitere sind
+        in beiden Fällen dieselben.</p>
+        <ul>
+          <li><b>Automatisch</b> (Standard und für nahezu jedes Gerät die richtige Antwort):
+          Es wird der Standard <b>RFC 1628</b> gelesen und auf eine Hersteller-MIB
+          gewechselt, sobald die USV darauf antwortet. Die Erkennung kostet keine zusätzliche
+          Abfrage, und ein späteres Firmware-Update, das RFC 1628 nachrüstet, wird von selbst
+          übernommen.</li>
+          <li><b>RFC 1628 (Standard)</b>: die herstellerunabhängige UPS-MIB, sonst nichts.</li>
+          <li><b>APC PowerNet</b>: die MIB der Netzwerkkarten von APC/Schneider.</li>
+        </ul>
+        <p>Besonders bei APC ist eine Hersteller-MIB nötig: Schneider unterstützt RFC 1628
+        nur auf der <b>Network Management Card 2</b> (AP9630/AP9631/AP9635) ab Firmware
+        <code>sumx</code>/<code>sy</code> <b>v5.1.7</b>; die älteren <b>NMC1</b>-Karten
+        (AP9617/AP9618/AP9619) sprechen ausschließlich PowerNet und sind über den Standard
+        gar nicht lesbar. Auch auf Karten, die beides beherrschen, ist PowerNet die bessere
+        Quelle: Sie liefert die Restlaufzeit in Hundertstelsekunden statt in ganzen Minuten
+        und meldet einen <b>Selbsttest</b> als eigenen Zustand — RFC 1628 kann einen
+        Selbsttest nicht von einem echten Stromausfall unterscheiden.</p>
+        <p>Eine MIB fest wählen nur, um sie zu erzwingen, etwa um ein Gerät zum Vergleich auf
+        den Standard festzunageln.</p>
 
         <h3>NUT-Server (USB- und serielle USVs)</h3>
         <p>Eine USV ohne Netzwerkkarte wird über
@@ -364,6 +390,11 @@ pveum user token add ups@pve shutdown --privsep 0</code></pre>
           bricht eine Sammelabfrage ab, sobald ein Objekt fehlt — die reguläre Abfrage
           scheitert dann komplett, obwohl die übrigen Werte lesbar wären. Die USV nach
           Möglichkeit auf <b>v2c</b> umstellen.</li>
+          <li><b>Alle RFC-1628-Objekte fehlen, alle Hersteller-Objekte antworten</b>: normal
+          bei einer APC-Karte ohne RFC-1628-Unterstützung. Im Modus <b>Automatisch</b> werden
+          beide MIBs aufgelistet, die tatsächlich genutzte steht oben, und die Zeile über der
+          Tabelle nennt sie. Es ist nichts zu ändern — die gezählten Objekte und die Hinweise
+          zu Auslösern beziehen sich immer auf die genutzte MIB, nicht auf die unterlegene.</li>
           <li><b>„veraltete Daten"</b> (NUT): upsd antwortet, aber sein Treiber hat den
           Kontakt zur USV verloren. Die noch gelieferten Werte sind alt, deshalb gilt die USV
           als nicht erreichbar — Alarm, nie ein Shutdown. Den NUT-Treiber auf der Maschine
@@ -586,6 +617,17 @@ systemctl start pve-usv-agent.service</code></pre>
         keine Restlaufzeit oder keinen Ladestand, sagt der Test das über der Objekttabelle —
         die zugehörige Schwelle ist dann dauerhaft wirkungslos. Stattdessen „Akkubetrieb
         länger als (s)" nutzen; dieser Zeitgeber läuft auf der eigenen Uhr der Appliance.</p>
+        <p>Bei einer SNMP-USV zusätzlich die Einstellung <b>MIB</b> prüfen. Viele Karten
+        veröffentlichen über ihre Hersteller-MIB, was sie in RFC 1628 auslassen;
+        <b>Automatisch</b> findet das von selbst, ein Blick lohnt also nur, wenn die MIB von
+        Hand festgelegt wurde (siehe <a href="#snmp">USV-Quellen</a>).</p>
+        <h3>Eine APC-USV funktioniert nicht / liefert nichts Brauchbares</h3>
+        <p>Die Einstellung <b>MIB</b> auf <b>Automatisch</b> stehen lassen — die APC-PowerNet-
+        MIB wird dann von selbst genutzt. Nötig ist sie, weil Schneider RFC 1628 nur auf der
+        Network Management Card 2 (AP9630/AP9631/AP9635) ab Firmware
+        <code>sumx</code>/<code>sy</code> v5.1.7 unterstützt, während die älteren
+        NMC1-Karten (AP9617/AP9618/AP9619) sie gar nicht implementieren. „USV testen" zeigt,
+        welche MIB genutzt wurde und welche Objekte jede von beiden beantwortet hat.</p>
         <h3>NUT: „kennt keine USV mit diesem Namen" oder gar keine Antwort</h3>
         <p>Der USV-Name muss dem Abschnittsnamen in der <code>ups.conf</code> von upsd
         entsprechen; <code>upsc -l &lt;host&gt;</code> listet die gültigen Namen. Antwortet
@@ -614,6 +656,25 @@ systemctl start pve-usv-agent.service</code></pre>
         <p class="muted">Vereinfachte, nutzersichtbare Highlights. Der vollständige technische
         Verlauf steht im <a href="https://github.com/ffind-dev/pve-ups/blob/main/CHANGELOG.md"
         target="_blank" rel="noopener">Changelog des GitHub-Repositories</a>.</p>
+
+        <div class="cl-ver">3.3.0 <span class="date">2026</span></div>
+        <ul>
+          <li><b>APC-USVs werden richtig unterstützt</b>: Eine SNMP-USV lässt sich jetzt über
+          eine <b>Hersteller-MIB</b> statt über RFC 1628 lesen, als erste <b>APC
+          PowerNet</b>. Damit sind auch APC-Karten erfasst, die über RFC 1628 gar nicht
+          erreichbar sind — die älteren NMC1 (AP9617/AP9618/AP9619) — sowie NMC2-Karten mit
+          Firmware unter sumx/sy v5.1.7. Siehe <a href="#snmp">USV-Quellen</a>.</li>
+          <li>Die neue Einstellung <b>MIB</b> steht auf <b>Automatisch</b> und erfordert keine
+          Aufmerksamkeit: Bestehende USV-Einträge erhalten sie beim Update, und eine USV
+          wechselt von selbst auf ihre Hersteller-MIB, sobald sie darauf antwortet.</li>
+          <li>Karten, die beides beherrschen, liefern <b>genauere Werte</b>: PowerNet meldet
+          die Restlaufzeit in Hundertstelsekunden statt in ganzen Minuten und kennzeichnet
+          einen <b>Selbsttest</b> als solchen — RFC 1628 kann ihn nicht von einem echten
+          Stromausfall unterscheiden.</li>
+          <li><b>Der USV-Test erklärt sich selbst</b>: Im Modus Automatisch listet er beide
+          MIBs auf und nennt, für welche er sich entschieden hat und warum. Das Dashboard
+          zeigt die genutzte MIB an.</li>
+        </ul>
 
         <div class="cl-ver">3.2.0 <span class="date">2026</span></div>
         <ul>
@@ -672,6 +733,7 @@ systemctl start pve-usv-agent.service</code></pre>
     <a href="https://github.com/ffind-dev/pve-ups/releases" target="_blank" rel="noopener">Releases</a> ·
     <a href="https://github.com/ffind-dev/pve-ups/issues" target="_blank" rel="noopener">Fehler melden</a> ·
     <a href="https://github.com/ffind-dev/pve-ups/security/policy" target="_blank" rel="noopener">Sicherheitslücke melden</a>
+    <br><span class="muted">Entwickelt mit KI-Unterstützung.</span>
   </footer>
 
   <script>

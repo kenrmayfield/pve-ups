@@ -5,9 +5,9 @@ and no config files.**
 
 *Deutsche Fassung: [README.de.md](README.de.md)*
 
-PVE-UPS monitors one or more UPS devices — **with an SNMP network card (standard
-RFC 1628)** or **through a NUT server**, which is how USB and serial UPS devices are
-read — and, on a power outage, shuts down one or more **standalone Proxmox VE hosts** in
+PVE-UPS monitors one or more UPS devices — **with an SNMP network card (standard RFC 1628
+or a vendor MIB such as APC PowerNet)** or **through a NUT server**, which is how USB and
+serial UPS devices are read — and, on a power outage, shuts down one or more **standalone Proxmox VE hosts** in
 an orderly fashion. The modern replacement for vendor-locked appliances such as APC
 PowerChute Network Shutdown. Everything is configured through a **web wizard**; monitoring
 is available as **REST/JSON**.
@@ -25,8 +25,9 @@ rather than replacing it:
 - **No config files** — a web wizard with test buttons for every step; settings apply live.
 - **No agents on the hosts** — shutdown goes through the Proxmox API using a dedicated,
   revocable **API token** with only the `Sys.PowerMgmt` privilege. No root SSH anywhere.
-- **Vendor-neutral** — the standard RFC 1628 UPS MIB via SNMP v1/v2c/v3 (pure-Python, no
-  net-snmp), or any existing NUT server as a read-only client.
+- **Vendor-neutral, but not naive about vendors** — the standard RFC 1628 UPS MIB via
+  SNMP v1/v2c/v3 (pure-Python, no net-snmp), automatically switching to a vendor MIB where
+  the standard falls short (APC PowerNet), or any existing NUT server as a read-only client.
 - **NUT stays a driver, never the brain** — PVE-UPS only ever reads variables from `upsd`.
   No `upsmon`, no `upssched`, no shutdown scripts: the thresholds, the host policy and the
   decision stay in the appliance, where you can see them.
@@ -148,7 +149,10 @@ shown only this once — copy it now). Enter both in the wizard under **Proxmox 
 - **Multiple UPS devices** per instance with host↔UPS mapping and per-host logic
   (**AND** = redundant power supplies, **OR** = split load), including a live feed diagram.
 - **Two UPS sources**, freely mixable in one instance:
-  - **SNMP v1/v2c and v3** (authPriv), RFC 1628 UPS MIB, read-only.
+  - **SNMP v1/v2c and v3** (authPriv), read-only. Reads the standard RFC 1628 UPS MIB or a
+    **vendor MIB** — currently **APC PowerNet**, which is what makes APC cards work that
+    implement RFC 1628 partially (NMC2 below firmware sumx/sy v5.1.7) or not at all (NMC1:
+    AP9617/AP9618/AP9619). Picked automatically per UPS; selectable by hand.
   - **NUT server** (TCP 3493) as a read-only client — for UPS devices without a network
     card. Works with the UPS server built into a Synology/QNAP/TrueNAS NAS, a Raspberry
     Pi, OPNsense, or a NUT install on a Proxmox host.
@@ -225,15 +229,19 @@ PVE_USV_CONFIG=./dev-config.yaml PVE_USV_DB=./dev-events.db python -m app.main
 # UI: http://127.0.0.1:8080
 #   SNMP: host 127.0.0.1, port 1161, community "public"  -> mains (100 %)
 #                                    community "battery" -> outage -> triggers fire
+#         The APC snapshots carry PowerNet OIDs only, i.e. a card without RFC 1628:
+#                                    community "apc"         -> mains, MIB resolves to APC
+#                                    community "apc-battery"  -> outage on the APC MIB
 #   NUT:  host 127.0.0.1, port 3493, UPS name "ups"
 ```
 
 ## Limits / assumptions
 
 - Standalone hosts only (no cluster/HA-manager interaction) — a possible future extension.
-- Reads either the standard RFC 1628 UPS MIB or a NUT server's variables — both
-  vendor-independent. There is no direct USB/serial support in the appliance itself; a
-  locally attached UPS is reached through a NUT server.
+- Reads the standard RFC 1628 UPS MIB, the APC PowerNet MIB, or a NUT server's variables.
+  Other vendor MIBs are not implemented yet — a device outside those needs either RFC 1628
+  or a NUT driver. There is no direct USB/serial support in the appliance itself; a locally
+  attached UPS is reached through a NUT server.
 - The NUT protocol is unencrypted. Use it inside a trusted network, or point it at an
   `upsd` listening on the loopback interface of the same machine.
 - In the optional Docker deployment, in-app updates and NTP/timezone management are not
@@ -242,3 +250,5 @@ PVE_USV_CONFIG=./dev-config.yaml PVE_USV_DB=./dev-events.db python -m app.main
 ## License
 
 MIT — Copyright © 2026 Florian Finder. See [LICENSE](LICENSE).
+
+<sub>Developed with AI assistance.</sub>

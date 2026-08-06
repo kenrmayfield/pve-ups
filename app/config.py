@@ -45,6 +45,18 @@ class SnmpVersion(str, Enum):
     v3 = "v3"
 
 
+class SnmpMib(str, Enum):
+    """Which UPS MIB the SNMP poller reads (see app/ups.py: PROFILES).
+
+    Every member needs a matching ``mib.<value>`` i18n key in en.js *and* de.js
+    (enforced by tests/test_i18n.py).
+    """
+
+    auto = "auto"  # read RFC 1628, switch to a vendor MIB when the device answers it
+    rfc1628 = "rfc1628"  # the standard UPS-MIB only
+    apc = "apc"  # APC PowerNet-MIB (1.3.6.1.4.1.318) only
+
+
 class SnmpAuthProto(str, Enum):
     none = "none"
     md5 = "md5"
@@ -121,6 +133,11 @@ class SnmpConfig(UpsBase):
     version: SnmpVersion = SnmpVersion.v2c
     timeout_s: float = 3.0
     retries: int = 1
+
+    # Which MIB to read. "auto" needs no migration: a config written before 3.3.0 has no
+    # ``mib`` key and picks up this default, which is exactly what an existing APC device
+    # wants. See app/ups.py for the profiles and how "auto" resolves.
+    mib: SnmpMib = SnmpMib.auto
 
     # v1/v2c
     community: SecretStr = SecretStr("public")

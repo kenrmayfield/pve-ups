@@ -13,6 +13,7 @@ from app.config import (
     HostConfig,
     NutConfig,
     SnmpConfig,
+    SnmpMib,
     SnmpVersion,
     Thresholds,
     UpsThresholdOverride,
@@ -110,6 +111,30 @@ def test_config_defaults_untyped_ups_entries_to_snmp(tmp_path):
     # ... and the type is written back explicitly on the next save.
     save_config(cfg, path)
     assert yaml.safe_load(path.read_text(encoding="utf-8"))["ups"][0]["type"] == "snmp"
+
+
+def test_config_defaults_the_mib_of_pre_3_3_entries_to_auto(tmp_path):
+    """A config written before MIB profiles must pick up "auto", so an existing APC UPS
+    starts using its vendor MIB after an update without anyone touching the wizard."""
+    import yaml
+
+    path = tmp_path / "config.yaml"
+    old = {"ups": [{"id": "a", "type": "snmp", "host": "10.0.0.1"}]}
+    path.write_text(yaml.safe_dump(old), encoding="utf-8")
+
+    cfg = load_config(path)
+    assert cfg.ups[0].mib == SnmpMib.auto
+
+    save_config(cfg, path)
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["ups"][0]["mib"] == "auto"
+
+
+def test_config_roundtrip_keeps_an_explicit_mib(tmp_path):
+    path = tmp_path / "config.yaml"
+    cfg = AppConfig(ups=[SnmpConfig(id="a", host="10.0.0.1", mib=SnmpMib.apc)])
+    save_config(cfg, path)
+
+    assert load_config(path).ups[0].mib == SnmpMib.apc
 
 
 def test_config_roundtrip_mixes_snmp_and_nut_sources(tmp_path):
@@ -1014,9 +1039,12 @@ def test_ingest_agent_result_logs_exactly_once(tmp_path, monkeypatch):
 
 # --- SNMP probe diagnostics (v3.1.0) ---------------------------------------
 def test_probe_names_cover_every_queried_oid():
+    """Every OID a profile queries must be nameable, or the probe would print bare OIDs."""
     from app import ups
 
-    assert set(ups._OID_NAMES) == set(ups._ALL_OIDS)
+    for profile in ups.PROFILES.values():
+        assert set(profile.oids) <= set(ups._OBJECTS), profile.id
+        assert all(ups._object_name(oid) != oid for oid in profile.oids), profile.id
 
 
 def test_probe_entry_classifies_missing_objects():
@@ -1130,7 +1158,8 @@ async def test_probe_of_unconfigured_ups_skips_everything():
 
     result = await ups.probe(SnmpConfig())
     assert result.reachable is False
-    assert result.total == len(ups._ALL_OIDS)
+    # Nothing was sent, so only the profile that would have been asked first is listed.
+    assert result.total == len(ups.DEFAULT_PROFILE.objects)
     assert [e.status for e in result.entries] == ["skipped"] * result.total
     assert "not configured" in result.summary
 
@@ -1150,7 +1179,8 @@ async def test_probe_closes_engine_exactly_once_and_stops_early(monkeypatch):
     assert closed[0] is not None
     assert result.reachable is False
     assert result.ok_count == 0
-    assert len(result.entries) == len(ups._ALL_OIDS)
+    # "auto" walks every profile, so the entry list covers all of them.
+    assert len(result.entries) == sum(len(p.objects) for p in ups.PROFILES.values())
     assert result.entries[0].status == "error"
     # Everything after the first failure is reported without waiting for its own timeout.
     assert all(e.status == "skipped" for e in result.entries[1:])
@@ -1183,10 +1213,293 @@ def test_probe_summary_flags_the_snmpv1_multi_get_trap():
             status="noSuchName",
         ),
     ]
-    summary = ups._probe_summary(cfg, result, None)
+    summary = ups._probe_summary(cfg, result, None, ups.RFC1628)
 
     assert "upsEstimatedMinutesRemaining" in summary
     assert "v2c" in summary
+
+
+# --- MIB profiles (v3.3.0) -------------------------------------------------
+def test_every_profile_is_structurally_sound():
+    """A profile must fill real UpsState fields and be able to feed every trigger."""
+    from dataclasses import fields
+
+    from app import ups
+
+    state_fields = {f.name for f in fields(ups.UpsState)}
+    seen: dict[str, str] = {}
+    for profile in ups.PROFILES.values():
+        assert profile.id in {m.value for m in SnmpMib}, profile.id
+        assert profile.anchor in profile.oids, profile.id
+        for obj in profile.objects:
+            assert obj.oid.endswith(".0"), obj.name  # scalars only; we never walk tables
+            # OIDs must be globally unique or the flat _OBJECTS registry would lose one.
+            assert seen.setdefault(obj.oid, profile.id) == profile.id, obj.oid
+            assert obj.field in state_fields, obj.name
+            assert obj.trigger is None or obj.trigger in ups.PROBE_TRIGGERS, obj.name
+            if obj.kind == ups.KIND_ENUM:
+                assert obj.enum, obj.name
+        # A profile that cannot feed a threshold would leave it silently dead.
+        assert set(profile.trigger_oids.values()) == set(ups.PROBE_TRIGGERS), profile.id
+
+
+def test_apc_timeticks_are_converted_to_seconds_and_minutes():
+    """TimeTicks are hundredths of a second - the classic vendor-MIB misreading."""
+    from pysnmp.proto.rfc1902 import Integer, OctetString, TimeTicks
+
+    from app import ups
+
+    state = ups.UpsState()
+    ups._map_state(state, ups.APC, {
+        ups.OID_APC_MODEL: OctetString(" Smart-UPS 1500 "),
+        ups.OID_APC_OUTPUT_STATUS: Integer(3),
+        ups.OID_APC_BATTERY_STATUS: Integer(3),
+        ups.OID_APC_TIME_ON_BATTERY: TimeTicks(9500),
+        ups.OID_APC_RUNTIME: TimeTicks(114000),
+        ups.OID_APC_CAPACITY: Integer(22),
+    })
+
+    assert state.mib == "apc"
+    assert state.manufacturer == "APC"        # PowerNet has no manufacturer object
+    assert state.model == "Smart-UPS 1500"
+    assert state.power_source == "battery" and state.on_battery is True
+    assert state.battery_status == "low" and state.battery_low is True
+    assert state.seconds_on_battery == 95     # 9500 / 100
+    assert state.runtime_remaining_min == 19  # 114000 / 6000
+    assert state.battery_charge_pct == 22
+    assert state.reachable is True
+
+
+def test_apc_rounds_the_runtime_down():
+    """9.9 minutes must not clear a "below 10 minutes" threshold by rounding up."""
+    from pysnmp.proto.rfc1902 import TimeTicks
+
+    from app import ups
+
+    state = ups.UpsState()
+    ups._map_state(state, ups.APC, {ups.OID_APC_RUNTIME: TimeTicks(59400)})  # 9.9 min
+    assert state.runtime_remaining_min == 9
+
+
+def test_apc_self_test_is_not_reported_as_an_outage():
+    """onBatteryTest(15) runs on battery but is a self-test - this app schedules them."""
+    from pysnmp.proto.rfc1902 import Integer
+
+    from app import ups
+
+    state = ups.UpsState()
+    ups._map_state(state, ups.APC, {ups.OID_APC_OUTPUT_STATUS: Integer(15)})
+    assert state.power_source == "mains"
+    assert state.on_battery is False
+
+
+def test_map_state_ignores_objects_the_device_does_not_implement():
+    """A missing object keeps the field's default instead of poisoning it with a sentinel."""
+    from pysnmp.proto import rfc1905
+    from pysnmp.proto.rfc1902 import Integer
+
+    from app import ups
+
+    state = ups.UpsState()
+    ups._map_state(state, ups.RFC1628, {
+        ups.OID_OUTPUT_SOURCE: Integer(3),
+        ups.OID_CHARGE_REMAINING: rfc1905.noSuchObject,
+    })
+    assert state.power_source == "mains"
+    assert state.battery_charge_pct is None
+    assert state.reachable is True
+
+
+def test_a_device_answering_no_object_of_the_mib_counts_as_unreachable():
+    """Pinning a UPS to the wrong MIB must not look healthy.
+
+    The agent replies, so the GET "succeeds" - but every object is missing. Reporting that
+    as reachable would show a card with no values, no alarm and no trigger that can ever
+    fire, which is exactly the fail-dangerous case the fail-safe rules exist to prevent.
+    """
+    from pysnmp.proto import rfc1905
+
+    from app import ups
+
+    state = ups.UpsState()
+    ups._map_state(state, ups.APC, {oid: rfc1905.noSuchInstance for oid in ups.APC.oids})
+
+    assert state.reachable is False
+    assert state.on_battery is False        # unreachable is an alarm, never a shutdown
+    assert "implements none of the APC PowerNet objects" in state.error
+
+
+def test_probe_entry_interprets_apc_values():
+    from pysnmp.proto.rfc1902 import Integer, TimeTicks
+
+    from app import ups
+
+    src = ups._probe_entry(
+        ups.OID_APC_OUTPUT_STATUS, None, 0, 0, [(ups.OID_APC_OUTPUT_STATUS, Integer(3))]
+    )
+    assert src.name == "upsBasicOutputStatus"
+    assert src.value == "battery (3)"
+
+    # The converted value is shown, the raw one stays in .raw - a unit bug is visible.
+    runtime = ups._probe_entry(
+        ups.OID_APC_RUNTIME, None, 0, 0, [(ups.OID_APC_RUNTIME, TimeTicks(114000))]
+    )
+    assert runtime.value == "19 min"
+    assert "114000" in runtime.raw
+
+
+def _script_snmp_get(monkeypatch, responses):
+    """Replace pysnmp's GET with a scripted response list. Returns the per-call varbind
+    counts, which is enough to tell a union GET from a plain one."""
+    import pysnmp.hlapi.asyncio as hlapi
+
+    from app import ups
+
+    asked: list[int] = []
+
+    async def fake_get(engine, auth, transport, context, *objects):
+        asked.append(len(objects))
+        return responses[len(asked) - 1]
+
+    for name in ("getCmd", "get_cmd"):
+        if hasattr(hlapi, name):
+            monkeypatch.setattr(hlapi, name, fake_get)
+    monkeypatch.setattr(ups, "_close_engine", lambda eng: None)
+    return asked
+
+
+@pytest.mark.asyncio
+async def test_auto_switches_to_the_vendor_mib_when_its_anchor_answers(monkeypatch):
+    """v2c: the standard GET carries the vendor anchor, so detection costs no round trip."""
+    from pysnmp.proto.rfc1902 import Integer, TimeTicks
+
+    from app import ups
+
+    responses = [
+        # RFC 1628 objects + the APC anchor: the card answers the anchor, so it speaks APC.
+        (None, 0, 0, [(ups.OID_APC_OUTPUT_STATUS, Integer(2))]),
+        (None, 0, 0, [
+            (ups.OID_APC_OUTPUT_STATUS, Integer(3)),
+            (ups.OID_APC_RUNTIME, TimeTicks(114000)),
+            (ups.OID_APC_CAPACITY, Integer(80)),
+        ]),
+    ]
+    asked = _script_snmp_get(monkeypatch, responses)
+
+    state = await ups.poll(SnmpConfig(host="127.0.0.1", mib=SnmpMib.auto))
+
+    assert asked == [len(ups.RFC1628.objects) + 1, len(ups.APC.objects)]
+    assert state.mib == "apc"
+    assert state.runtime_remaining_min == 19
+    assert state.reachable is True
+
+
+@pytest.mark.asyncio
+async def test_auto_stays_on_the_standard_when_no_vendor_anchor_answers(monkeypatch):
+    """An RFC 1628 device must cost exactly one GET, as it did before MIB profiles."""
+    from pysnmp.proto import rfc1905
+    from pysnmp.proto.rfc1902 import Integer
+
+    from app import ups
+
+    responses = [(None, 0, 0, [
+        (ups.OID_OUTPUT_SOURCE, Integer(3)),
+        (ups.OID_MINUTES_REMAINING, Integer(42)),
+        (ups.OID_APC_OUTPUT_STATUS, rfc1905.noSuchObject),
+    ])]
+    asked = _script_snmp_get(monkeypatch, responses)
+
+    state = await ups.poll(SnmpConfig(host="127.0.0.1", mib=SnmpMib.auto))
+
+    assert asked == [len(ups.RFC1628.objects) + 1]
+    assert state.mib == "rfc1628"
+    assert state.power_source == "mains"
+    assert state.runtime_remaining_min == 42
+
+
+@pytest.mark.asyncio
+async def test_explicit_mib_asks_for_that_profile_only(monkeypatch):
+    from pysnmp.proto.rfc1902 import Integer
+
+    from app import ups
+
+    responses = [(None, 0, 0, [(ups.OID_APC_OUTPUT_STATUS, Integer(3))])]
+    asked = _script_snmp_get(monkeypatch, responses)
+
+    state = await ups.poll(SnmpConfig(host="127.0.0.1", mib=SnmpMib.apc))
+
+    assert asked == [len(ups.APC.objects)]  # no anchor appended, no detection
+    assert state.mib == "apc"
+
+
+@pytest.mark.asyncio
+async def test_auto_falls_back_to_the_vendor_mib_under_snmpv1(monkeypatch):
+    """v1 aborts a GET over one missing object - which is how an APC NMC1 answers."""
+    from pysnmp.proto import rfc1905
+    from pysnmp.proto.rfc1902 import Integer
+
+    from app import ups
+
+    responses = [
+        (None, rfc1905.errorStatus.clone(2), 1, []),        # noSuchName on RFC 1628
+        (None, 0, 0, [(ups.OID_APC_OUTPUT_STATUS, Integer(3))]),
+    ]
+    asked = _script_snmp_get(monkeypatch, responses)
+
+    cfg = SnmpConfig(host="127.0.0.1", version=SnmpVersion.v1, mib=SnmpMib.auto)
+    state = await ups.poll(cfg)
+
+    # The anchor is never appended under v1 - it would break every non-vendor device.
+    assert asked == [len(ups.RFC1628.objects), len(ups.APC.objects)]
+    assert state.mib == "apc"
+    assert state.power_source == "battery"
+
+
+@pytest.mark.asyncio
+async def test_auto_does_not_spend_a_second_timeout_on_an_unreachable_ups(monkeypatch):
+    """A timeout means "not reachable", not "wrong MIB". Two timeouts per poll would
+    exceed the 8 s on-battery interval and delay the outage response."""
+    from app import ups
+
+    for version in (SnmpVersion.v1, SnmpVersion.v2c):
+        responses = [("No SNMP response received before timeout", 0, 0, [])] * 2
+        asked = _script_snmp_get(monkeypatch, responses)
+
+        state = await ups.poll(SnmpConfig(host="127.0.0.1", version=version, mib=SnmpMib.auto))
+
+        assert len(asked) == 1, version
+        assert state.reachable is False
+        assert "timeout" in state.error
+
+
+@pytest.mark.asyncio
+async def test_probe_counts_only_the_resolved_profile(monkeypatch):
+    """An APC card answers 6 of 13 probed objects - reporting that as a defect would make
+    the wizard cry wolf on a perfectly healthy device."""
+    from pysnmp.proto import rfc1905
+    from pysnmp.proto.rfc1902 import Integer
+
+    from app import ups
+
+    def answer(oid):
+        if oid in ups.APC.oids:
+            return (None, 0, 0, [(oid, Integer(3 if oid == ups.OID_APC_OUTPUT_STATUS else 5))])
+        return (None, 0, 0, [(oid, rfc1905.noSuchObject)])
+
+    responses = [answer(oid) for p in ups.PROFILES.values() for oid in p.oids]
+    asked = _script_snmp_get(monkeypatch, responses)
+
+    result = await ups.probe(SnmpConfig(host="127.0.0.1", mib=SnmpMib.auto))
+
+    assert len(asked) == sum(len(p.objects) for p in ups.PROFILES.values())
+    assert result.mib == "apc"
+    assert result.reachable is True
+    assert (result.ok_count, result.total) == (len(ups.APC.objects), len(ups.APC.objects))
+    assert result.missing_triggers == []
+    # The resolved MIB is listed first; the standard's objects stay on for diagnosis.
+    assert [e.oid for e in result.entries[:len(ups.APC.objects)]] == ups.APC.oids
+    assert all(e.status == "noSuchObject" for e in result.entries[len(ups.APC.objects):])
+    assert "does not implement RFC 1628" in result.summary
 
 
 @pytest.mark.asyncio
@@ -1586,7 +1899,8 @@ def _full_config() -> AppConfig:
         configured=True,
         dry_run=False,
         ups=[
-            SnmpConfig(id="a", name="UPS A", host="10.0.0.1", community="comm-a"),
+            SnmpConfig(id="a", name="UPS A", host="10.0.0.1", community="comm-a",
+                       mib=SnmpMib.apc),
             SnmpConfig(
                 id="b", name="UPS B", host="10.0.0.2", port=1161, version=SnmpVersion.v3,
                 v3_user="mon", v3_auth_pass="auth-b", v3_priv_pass="priv-b",
