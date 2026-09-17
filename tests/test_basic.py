@@ -4248,6 +4248,147 @@ async def test_auth_header_is_attached_to_any_format(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_extra_headers_ride_along_with_every_format(monkeypatch):
+    """#34: a target may need more headers than the one authenticating one."""
+    from app import notify
+
+    calls = _fake_httpx(monkeypatch)
+    # Nextcloud Talk, the case that asked for this: Basic auth plus two plain headers.
+    hook = _hook(format="custom", template='{"message":"x"}',
+                 auth_header_name="Authorization", auth_header_value="Basic dXNlcjpwdw==",
+                 extra_headers={"OCS-APIRequest": "true", "Accept": "application/json"})
+    await notify.send_webhook(hook, "s", "b", "warning", _SNAPSHOT)
+    headers = calls[0][1]["headers"]
+    assert headers["OCS-APIRequest"] == "true"
+    assert headers["Accept"] == "application/json"
+    assert headers["Authorization"] == "Basic dXNlcjpwdw=="
+
+    # A json-payload format has no headers of its own; the extras must still arrive.
+    calls.clear()
+    await notify.send_webhook(_hook(format="json", extra_headers={"X-Token": "abc"}),
+                              "s", "b", "warning", _SNAPSHOT)
+    assert calls[0][1]["headers"] == {"X-Token": "abc"}
+
+
+@pytest.mark.asyncio
+async def test_extra_headers_beat_the_format_but_never_the_auth_header(monkeypatch):
+    """The precedence that makes the plain-text field safe next to the masked one.
+
+    An extra header may override what the formatter chose (a target wanting a different
+    Content-Type has no other way to say so), but must not be able to shadow the auth
+    header — that is the only one of the three carrying a secret.
+    """
+    from app import notify
+
+    calls = _fake_httpx(monkeypatch)
+    hook = _hook(format="ntfy", auth_header_name="Authorization",
+                 auth_header_value="Bearer tk_secret",
+                 extra_headers={"Content-Type": "application/json",
+                                "Authorization": "Bearer spoofed"})
+    await notify.send_webhook(hook, "s", "b", "warning", _SNAPSHOT)
+    headers = calls[0][1]["headers"]
+    assert headers["Content-Type"] == "application/json"   # formatter overridden
+    assert headers["Authorization"] == "Bearer tk_secret"  # secret still wins
+    assert headers["Priority"]  # ntfy's own untouched headers are still there
+
+
+def test_extra_headers_are_parsed_from_lines_and_never_reject_the_config():
+    """The UI sends a textarea, config.yaml holds a mapping; both land in one clean dict.
+
+    Follows the rule every validator in config.py follows: drop what is malformed, never
+    raise — a header in the wrong shape is fixable from the UI, a refused import is not.
+    """
+    from app.config import WebhookConfig, parse_extra_headers
+
+    parsed = parse_extra_headers(
+        "OCS-APIRequest: true\n"
+        "  Accept : application/json  \n"   # whitespace around both halves
+        "\n"                                 # blank
+        "# a comment\n"
+        "no-colon-here\n"                    # not a header at all
+        ": novalue\n"                        # empty name
+        "X-Bad Name: x\n"                    # space is not allowed in a field name
+        "Content-Length: 99\n"               # httpx owns this one
+        "Host: elsewhere\n"
+    )
+    assert parsed == {"OCS-APIRequest": "true", "Accept": "application/json"}
+
+    # A mapping (config.yaml, a backup import) goes through the same filter, and so does
+    # anything else that may arrive — a list, a number, None — without raising.
+    assert parse_extra_headers({"X-A": "1", "Bad Name": "2"}) == {"X-A": "1"}
+    assert parse_extra_headers(None) == {} and parse_extra_headers(7) == {}
+
+    # Header splitting, by both routes it could arrive. From the textarea a pasted CRLF is
+    # simply a line break, so the smuggled header becomes an ordinary second header that is
+    # validated on its own terms — nothing is smuggled INTO a value. Through the mapping
+    # there is no line break to split on, so the CR/LF would have to survive inside the
+    # value itself, and that is what the value pattern refuses.
+    assert parse_extra_headers("X-Inject: a\r\nEvil: b") == {"X-Inject": "a", "Evil": "b"}
+    assert parse_extra_headers({"X-Inject": "a\r\nEvil: b"}) == {}
+
+    # Non-ASCII is refused rather than stored, even though RFC 7230 obs-text allows it:
+    # httpx encodes header values as ASCII, so keeping one would save a webhook that
+    # then fails every delivery with a codec error instead of at the point of entry.
+    assert parse_extra_headers("X-Note: Café") == {}
+
+    # And through the model, which is how both of the above actually get there.
+    assert WebhookConfig(extra_headers="X-A: 1").extra_headers == {"X-A": "1"}
+    assert WebhookConfig(extra_headers=["nonsense"]).extra_headers == {}
+
+
+def test_extra_headers_are_capped():
+    """Bounded like every other free-form field: a paste accident is not a config."""
+    from app.config import MAX_EXTRA_HEADERS, parse_extra_headers
+
+    many = "\n".join(f"X-H{i}: v" for i in range(MAX_EXTRA_HEADERS + 10))
+    assert len(parse_extra_headers(many)) == MAX_EXTRA_HEADERS
+    assert parse_extra_headers(f"X-Long: {'v' * 5000}") == {}
+
+
+def test_a_disabled_webhook_without_a_url_survives_a_save():
+    """#35: a card switched off is a draft, not something to refuse the whole save over.
+
+    It used to be dropped on save, so the UI had to block the save to stop it vanishing in
+    silence — and the way out was to invent a URL for a webhook that was switched off.
+    """
+    from app import main
+    from app.config import Notifications, WebhookConfig
+
+    existing = AppConfig(notifications=Notifications(webhooks=[
+        WebhookConfig(id="w1", name="Talk", enabled=False, url="",
+                      auth_header_name="Authorization", auth_header_value="Basic keep"),
+    ]))
+    incoming = {
+        "ups": [], "hosts": [],
+        "notifications": {"webhooks": [{
+            "id": "w1", "name": "Talk", "enabled": False, "url": "",
+            "auth_header_name": "Authorization",
+            "auth_header_value": main.SECRET_PLACEHOLDER,
+        }]},
+    }
+    merged = main._merge_config(incoming, existing)
+    hook = merged.notifications.webhooks[0]
+    assert hook.id == "w1" and hook.name == "Talk" and hook.url == ""
+    # The secret the card never showed is still there, matched by the id as always.
+    assert hook.auth_header_value.get_secret_value() == "Basic keep"
+
+
+@pytest.mark.asyncio
+async def test_a_webhook_without_a_url_is_never_posted_to(monkeypatch):
+    """The other half of #35: keeping the draft must not make it send anywhere."""
+    from app import notify
+    from app.config import Notifications
+
+    calls = _fake_httpx(monkeypatch)
+    cfg = Notifications(webhooks=[
+        _hook(id="draft", url="", enabled=True),   # enabled but nowhere to go
+        _hook(id="real", url="https://real/x"),
+    ])
+    await notify.notify(cfg, "Subj", "Body", _SNAPSHOT, "warning")
+    assert [url for url, _ in calls] == ["https://real/x"]
+
+
+@pytest.mark.asyncio
 async def test_every_enabled_webhook_gets_the_notification(monkeypatch):
     from app import notify
     from app.config import Notifications
@@ -6115,6 +6256,107 @@ async def test_a_green_selftest_still_says_dry_run_is_on(monkeypatch):
     armed._log_quiet = lambda subject, body, sev: quiet2.append(subject)  # type: ignore
     await armed._run_selftest()
     assert [q for q in quiet2 if "Dry-run is on" in q] == []
+
+
+def _green_selftest_engine(monkeypatch, **cfg_kw):
+    """An engine whose hosts always pass the credential check, with the quiet log captured."""
+    from app import engine as engine_mod
+    from app.proxmox import TestResult
+
+    monkeypatch.setattr(engine_mod, "_local_now", lambda: datetime(2026, 7, 25, 10, 0))
+
+    async def fake_test(host, *a, **k):
+        return TestResult(True, "ok", has_power_mgmt=True, node_state="ok")
+
+    monkeypatch.setattr(engine_mod.targets, "test_connection", fake_test)
+    eng = Engine(AppConfig(
+        configured=True,
+        hosts=[PveHostConfig(id="h", name="pve01", api_url="https://10.0.0.10:8006",
+                             token_id="ups@pve!s", token_secret="sec")], **cfg_kw))
+    quiet: list[str] = []
+    eng._log_quiet = lambda subject, body, sev: quiet.append(subject)  # type: ignore
+    return eng, quiet
+
+
+@pytest.mark.asyncio
+async def test_selftest_log_ok_off_silences_only_the_green_lines(monkeypatch):
+    """#28: the daily "ok" line is noise in a small estate — the CHECK is not.
+
+    The request was a weekly or monthly interval, which would have meant testing the
+    credentials less often; this answers the actual complaint instead. Everything that
+    reports a problem stays exactly as loud as before.
+    """
+    eng, quiet = _green_selftest_engine(monkeypatch, selftest_log_ok=False)
+    await eng._run_selftest()
+    assert [q for q in quiet if "Self-test" in q] == []
+    # The verdict itself is unaffected: the dashboard, /api/status and /api/health all read
+    # host_states, and none of them may go blind because the log line was switched off.
+    assert eng.host_states["h"]["credentials_ok"] is True
+    assert eng.last_selftest_ok is True and eng.last_selftest_at is not None
+
+    on, quiet_on = _green_selftest_engine(monkeypatch, selftest_log_ok=True)
+    await on._run_selftest()
+    assert [q for q in quiet_on if "Self-test pve01: ok" in q]
+
+
+@pytest.mark.asyncio
+async def test_selftest_log_ok_off_keeps_failures_and_the_manual_run(monkeypatch):
+    """The two things that must never be silenced: a failure, and an explicit request."""
+    from app import engine as engine_mod
+    from app.proxmox import TestResult
+
+    eng, quiet = _green_selftest_engine(monkeypatch, selftest_log_ok=False)
+    emitted: list = []
+    eng._emit = lambda subject, body, severity: _async_append(emitted, (subject, severity))
+
+    async def failing(host, *a, **k):
+        return TestResult(False, "Authentication failed (token invalid?)")
+
+    monkeypatch.setattr(engine_mod.targets, "test_connection", failing)
+    await eng._run_selftest()
+    assert [s for s, _ in emitted if "FAILED" in s]
+
+    # The recovery closes out that failure and is written even with the switch off:
+    # otherwise the log's last word on this host stays "FAILED" forever.
+    async def passing(host, *a, **k):
+        return TestResult(True, "ok", has_power_mgmt=True, node_state="ok")
+
+    monkeypatch.setattr(engine_mod.targets, "test_connection", passing)
+    quiet.clear()
+    await eng._run_selftest()
+    assert [q for q in quiet if "Self-test pve01: ok" in q]
+
+    # And "Test now" reports its result whatever the switch says — pressing a button and
+    # being told nothing is indistinguishable from a broken button.
+    ok, quiet_ok = _green_selftest_engine(monkeypatch, selftest_log_ok=False)
+    await ok._run_selftest(force_log=True)
+    assert [q for q in quiet_ok if "Self-test pve01: ok" in q]
+
+
+@pytest.mark.asyncio
+async def test_dry_run_notice_survives_the_selftest_log_switch(monkeypatch):
+    """The switch hides good news, not a standing misconfiguration.
+
+    Both lines shared one flag, so silencing the green ones would also have silenced the
+    only line saying the appliance will not actually shut anything down — which is why
+    _run_selftest() keeps log_daily and log_ok apart.
+    """
+    eng, quiet = _green_selftest_engine(monkeypatch, dry_run=True, selftest_log_ok=False)
+    await eng._run_selftest()
+    assert [q for q in quiet if "Self-test" in q] == []
+    assert [q for q in quiet if "Dry-run is on" in q]
+
+
+async def _async_append(sink: list, item) -> None:
+    sink.append(item)
+
+
+def test_config_roundtrip_selftest_log_ok(tmp_path):
+    path = tmp_path / "c.yaml"
+    save_config(AppConfig(selftest_log_ok=False), path)
+    assert load_config(path).selftest_log_ok is False
+    # Absent (every config written before 4.2.0) means the previous behaviour, not silence.
+    assert AppConfig().selftest_log_ok is True
 
 
 def _startup_engine(monkeypatch, state, detail="nope", **cfg_kw):

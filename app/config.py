@@ -562,6 +562,66 @@ class WebhookLevel(str, Enum):
     critical = "critical"  # only what needs an immediate reaction
 
 
+# --- extra webhook headers --------------------------------------------------
+# An RFC 7230 field name, and a value restricted to printable ASCII plus tab. Anything
+# outside these is dropped rather than escaped: the only reason a CR or LF reaches here is
+# a paste accident or an injection attempt, and neither deserves a best-effort rescue.
+#
+# Narrower than the RFC on purpose: obs-text (\x80-\xff) is legal on the wire, but httpx
+# encodes header values as ASCII and raises. Accepting a byte we cannot send would store a
+# webhook that saves cleanly and then fails every delivery with a codec error — exactly the
+# silently dead notification path the rest of this module is built against.
+_HEADER_NAME_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_HEADER_VALUE_RE = re.compile(r"^[\t\x20-\x7e]*$")
+
+# Headers httpx owns. Letting the user set these does not configure the request, it
+# corrupts it — a hand-written Content-Length desynchronises the body, and Host/Connection/
+# Transfer-Encoding belong to the connection rather than the message.
+_HEADER_DENYLIST = frozenset({"host", "content-length", "transfer-encoding", "connection"})
+
+MAX_EXTRA_HEADERS = 20
+MAX_HEADER_NAME_LEN = 128
+MAX_HEADER_VALUE_LEN = 1024
+
+
+def parse_extra_headers(value) -> dict[str, str]:
+    """Normalise the ``extra_headers`` field to a clean name -> value mapping.
+
+    Accepts both shapes that reach it: a mapping (config.yaml, a backup import) and the
+    UI's textarea, which sends one ``Name: Value`` line per header. Follows the same rule
+    as every other validator in this file — it **never raises**. A malformed line is
+    dropped, because a webhook header in the wrong shape is fixable from the UI while a
+    refused config import is not.
+    """
+    if isinstance(value, str):
+        items = []
+        for line in value.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or ":" not in line:
+                continue  # a comment or a line that simply is not a header
+            name, _, val = line.partition(":")
+            items.append((name, val))
+    elif isinstance(value, dict):
+        items = list(value.items())
+    else:
+        return {}
+
+    out: dict[str, str] = {}
+    for name, val in items:
+        if len(out) >= MAX_EXTRA_HEADERS:
+            break
+        name = str(name).strip()
+        val = str("" if val is None else val).strip()
+        if not name or len(name) > MAX_HEADER_NAME_LEN or len(val) > MAX_HEADER_VALUE_LEN:
+            continue
+        if not _HEADER_NAME_RE.match(name) or not _HEADER_VALUE_RE.match(val):
+            continue
+        if name.lower() in _HEADER_DENYLIST:
+            continue
+        out[name] = val
+    return out
+
+
 class WebhookConfig(BaseModel):
     # Identity, mirroring UpsBase: ``id`` is a stable slug (auto-filled on save), ``name``
     # the label shown in the UI. Several webhooks may point at different chat systems.
@@ -582,10 +642,30 @@ class WebhookConfig(BaseModel):
     content_type: str = "application/json"
 
     # Optional single auth header (e.g. "Authorization: Bearer …" for ntfy, or an API-key
-    # header). One named header rather than a free-form map: it covers the real cases and
-    # keeps the value on the proven masked-secret path below.
+    # header). One *named* header rather than a free-form map, because this is the field
+    # that carries a secret: a fixed name keeps the value on the proven masked-secret
+    # path below. Everything else the target wants goes in ``extra_headers``, which is
+    # free-form precisely because nothing in it is confidential.
     auth_header_name: str = ""
     auth_header_value: SecretStr = SecretStr("")
+
+    # Additional headers the target insists on, beyond the one above. Nextcloud Talk is the
+    # case that asked for it (#34): it needs "OCS-APIRequest: true" and an Accept header
+    # alongside the Basic auth, and neither of those two is a secret.
+    #
+    # Deliberately NOT on the masked path, and that is the division of labour: the one
+    # named header above stays the place for credentials — masked in /api/config, carried
+    # across a save by _reconcile_webhook_secrets — while these are stored and shown in
+    # plain text. The UI help says so; putting a token here would weaken the field next
+    # door rather than extend it. notify.send_webhook() applies the auth header last for
+    # the same reason, so an entry here can never shadow it.
+    extra_headers: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("extra_headers", mode="before")
+    @classmethod
+    def _normalise_extra_headers(cls, value):
+        """Drop anything malformed; never reject the import (see parse_extra_headers)."""
+        return parse_extra_headers(value)
 
     @property
     def label(self) -> str:
@@ -668,6 +748,14 @@ class AppConfig(BaseModel):
     selftest_enabled: bool = True
     selftest_hour: int = 9  # anchor: hour of day (0-23, server local time)
     selftest_interval_min: int = 1440  # repeat every N minutes from the anchor; 1440 = daily
+    # Whether a PASSING self-test writes its quiet line to the event log. Off means the log
+    # only ever mentions the check when it fails — the answer to "the daily ok line is noise
+    # in a small estate" that does NOT reduce how often the credentials are verified, which
+    # is the whole point of the check (a token can break any day, firewall rules included).
+    # Never touches the failure path, journald, or an explicitly requested run; see
+    # engine._run_selftest(), where this narrows ``log_ok`` but deliberately not the
+    # standing dry-run notice that shares the same daily cadence.
+    selftest_log_ok: bool = True
 
     # Optional NTP server pushed to the container's systemd-timesyncd (empty = leave
     # the system default untouched). Applied by the privileged deploy agent.

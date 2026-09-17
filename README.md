@@ -291,7 +291,8 @@ from Proxmox VE and explain the commands above:
 - **Webhook notifications** on notable events — as many targets as you like, each with its
   own format (full status JSON, **Microsoft Teams**, **Slack**, **Discord**, **ntfy**,
   plain text, or a **custom template** with placeholder substitution), severity filter,
-  optional authentication header and test-send button. Sends run in parallel and under a
+  optional authentication header plus any extra headers the target needs (Nextcloud Talk
+  and the like), and a test-send button. Sends run in parallel and under a
   common ceiling, so one unreachable target costs neither the others their notification
   nor the shutdown its battery. A target that stops working is reported like a broken
   shutdown credential: an event, a note on its card and a line on the dashboard — an

@@ -167,7 +167,7 @@
   <header class="topbar">
     <span class="brand">
       <svg class="mark icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5v6c0 5 3.4 8.5 8 11 4.6-2.5 8-6 8-11V5l-8-3z"/></svg>
-      PVE-UPS <span class="sub">Benutzerhandbuch · v4.1.0</span>
+      PVE-UPS <span class="sub">Benutzerhandbuch · v4.2.0</span>
     </span>
     <span class="spacer"></span>
     <a class="btn" href="https://github.com/ffind-dev/pve-ups" target="_blank"
@@ -1214,6 +1214,19 @@ curl -s http://&lt;container-ip&gt;:8080/api/status \
         ntfy-Topic oder ein API-Key-Header. Der Wert gilt als Geheimnis: Er wird nie über die
         API zurückgegeben und bleibt beim Speichern erhalten, ohne erneut eingegeben zu
         werden.</p>
+        <p><b>Zusätzliche Header</b> (optional, je Webhook) — ein Header je Zeile, in der Form
+        <code>Name: Wert</code>, für Ziele, die mehr als den einen Header oben brauchen.
+        Typischer Fall ist Nextcloud Talk: Neben der Basic-Authentifizierung erwartet es
+        <code>OCS-APIRequest: true</code> und <code>Accept: application/json</code>. Diese
+        Header überschreiben, was das gewählte Format setzt, nie aber den
+        Authentifizierungs-Header darüber. Zeilen, die kein gültiger Header sind, werden
+        ignoriert.</p>
+        <div class="callout warn">
+          <span><b>Hier keine Geheimnisse.</b> Anders als beim Authentifizierungs-Header
+          darüber werden diese Werte im Klartext gespeichert, angezeigt und von der
+          Konfigurations-API zurückgegeben. Alles Vertrauliche gehört in das Feld
+          <b>Wert</b> darüber.</span>
+        </div>
         <p><b>Senden ab Stufe</b> — welche Ereignisse überhaupt gesendet werden. Alles
         unterhalb der gewählten Stufe steht weiterhin im Ereignisprotokoll, löst aber keine
         Nachricht aus:</p>
@@ -1272,6 +1285,26 @@ curl -s http://&lt;container-ip&gt;:8080/api/status \
         zuschüttet. Im Akkubetrieb wird der Selbsttest komplett ausgelassen — im Ernstfall
         hat der Countdown Vorrang. Ein Neustart wiederholt einen Selbsttest nicht, der im
         aktuellen Zeitfenster bereits gelaufen ist.</p>
+        <p>Wem selbst diese eine Zeile pro Tag zu viel ist — etwa als alleiniger
+        Administrator, der weiß, wann sich ein Token geändert hat —, wählt
+        <b>„Erfolgreiche Selbsttests ins Eventlog schreiben"</b> ab. Es verschwindet nur die
+        routinemäßige grüne Zeile: Die Prüfung läuft weiter im eingestellten Intervall,
+        Fehler werden wie bisher protokolliert und gemeldet, das System-Journal zeichnet
+        jeden Lauf auf, und das Ergebnis je Host im Dashboard bleibt unberührt. Die
+        Cluster-Prüfung hängt an Zeitplan und Logzeile des Selbsttests, also verstummt auch
+        das <code>Cluster &lt;Name&gt;: ok</code> je Cluster; jede <em>Warnung</em> zum
+        Cluster wird wie bisher gemeldet. Zwei grüne Zeilen überleben den Schalter ebenfalls:
+        ein selbst angestoßener Lauf und die Meldung, dass sich ein Fehler erholt hat.</p>
+        <div class="callout info">
+          <span>Ein wöchentliches oder monatliches Intervall gibt es bewusst nicht. Der
+          Selbsttest existiert, um eine Berechtigung zu finden, die seit dem letzten
+          Stromausfall kaputtgegangen ist — ein geändertes Token, eine neue Firewall-Regel,
+          eine getauschte USV-Netzwerkkarte —, und nichts davon hält sich an einen Zeitplan.
+          Stört das Ereignisprotokoll, gehört die Zeile abgeschaltet, nicht die Prüfung; soll
+          der Zustand aktiv überwacht werden, fragt das Monitoring-System
+          <code>/api/health</code> ab (siehe <a href="#monitoring">Monitoring</a>) — das
+          deckt zusätzlich den Fall ab, dass die Appliance gar nicht mehr läuft.</span>
+        </div>
         <p><b>Das Speichern der Einstellungen löst keinen Selbsttest aus</b> — das ist
         Absicht, damit das Bearbeiten der Konfiguration nicht die Proxmox-API belastet. Nach
         dem Ändern eines Tokens oder dem Aktivieren der Cluster-Option führt
@@ -1423,6 +1456,24 @@ systemctl start pve-usv-agent.service</code></pre>
         <p class="muted">Vereinfachte, nutzersichtbare Highlights. Der vollständige technische
         Verlauf steht im <a href="https://github.com/ffind-dev/pve-ups/blob/main/CHANGELOG.md"
         target="_blank" rel="noopener">Changelog des GitHub-Repositories</a>.</p>
+
+        <div class="cl-ver">4.2.0 <span class="date">2026</span></div>
+        <ul>
+          <li><b>Ein abgeschalteter Webhook braucht keine URL mehr.</b> Ein halb
+          vorbereitetes Benachrichtigungsziel bleibt als Entwurf erhalten; nur ein
+          <em>aktives</em> besteht weiterhin darauf, irgendwohin senden zu können.</li>
+          <li><b>Webhooks können zusätzliche Header mitschicken.</b> Ziele, die mehr als
+          einen brauchen — etwa Nextcloud Talk mit <code>OCS-APIRequest</code> und
+          <code>Accept</code> neben der Authentifizierung —, funktionieren jetzt ohne
+          vorgeschalteten Proxy.</li>
+          <li><b>Passwortmanager können die Anmeldemaske wieder ausfüllen.</b> Die
+          Anmeldeseite ist ein echtes Formular mit Benutzernamensfeld — daran hängt das
+          automatische Ausfüllen; die Token- und Passwortfelder in den Einstellungen sind
+          so gekennzeichnet, dass ein Manager sie in Ruhe lässt.</li>
+          <li><b>Erfolgreiche Selbsttests lassen sich aus dem Eventlog heraushalten</b>, ohne
+          die Berechtigungen seltener zu prüfen. Fehler, Erholungen und „Selbsttest jetzt
+          ausführen" melden immer.</li>
+        </ul>
 
         <div class="cl-ver">4.1.0 <span class="date">2026</span></div>
         <ul>

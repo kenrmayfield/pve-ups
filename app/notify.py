@@ -295,12 +295,22 @@ async def send_webhook(
     else:
         kwargs = FORMATTERS.get(fmt, _render_json)(subject, body, severity, payload)
 
-    # An optional auth header rides along with whatever the formatter produced.
+    # Headers ride along with whatever the formatter produced, in a fixed precedence:
+    # formatter -> extra_headers -> auth header.
+    #
+    # extra_headers beats the formatter on purpose — a target that wants a different
+    # Content-Type than the payload shape implies has no other way to say so. The auth
+    # header is applied last and therefore always wins: it is the only one of the three
+    # carrying a secret, and a plain-text entry in extra_headers must not be able to
+    # shadow it with an empty or stale value.
+    headers = {**kwargs.get("headers", {}), **(hook.extra_headers or {})}
     name = (hook.auth_header_name or "").strip()
     if name:
         value = hook.auth_header_value.get_secret_value()
         if value:
-            kwargs["headers"] = {**kwargs.get("headers", {}), name: value}
+            headers[name] = value
+    if headers:
+        kwargs["headers"] = headers
 
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(hook.url, **kwargs)

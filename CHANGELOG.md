@@ -10,6 +10,67 @@ reads it dynamically. On every release: bump `__version__` **and** add a section
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-09-17
+
+A small release from GitHub issue reports.
+
+Two settings are added, both defaulting to the previous behaviour: `selftest_log_ok` and,
+per webhook, `extra_headers`. Nothing else in the configuration changes, and no existing
+config needs editing.
+
+### Highlights
+- **A webhook you have switched off no longer has to have a URL** ([#35]). Half-prepared
+  notification targets are kept as drafts; only an *active* one still insists on somewhere
+  to post.
+- **Webhooks can carry extra headers** ([#34]), so targets that need more than one — like
+  Nextcloud Talk, which wants `OCS-APIRequest` and `Accept` alongside its authorisation —
+  work without a proxy in front.
+- **Password managers can fill the login form again** ([#26]). The sign-in page is a real
+  form with a username field, which is what a manager's inline autofill keys on; the token
+  and password fields in Settings are marked so it leaves them alone.
+- **Successful self-tests can be kept out of the event log** ([#28]) without testing the
+  credentials any less often. Failures, recoveries and "Test now" always report.
+
+### Added
+- `extra_headers` per webhook: additional headers as `Name: Value`, one per line, for
+  targets that need more than the single authorisation header ([#34]). Deliberately not on
+  the masked-secret path — these are stored and shown in plain text, and the UI says so;
+  the existing header field remains the place for credentials. They override the headers
+  the chosen format sets, but never the authorisation header, so an entry here cannot
+  shadow the secret next to it. Unparsable lines, header-splitting attempts and the
+  headers the HTTP client owns (`Host`, `Content-Length`, `Transfer-Encoding`,
+  `Connection`) are dropped rather than refused, like every other import in this project.
+- `selftest_log_ok` (default on, i.e. unchanged): with it off, a passing self-test no
+  longer writes its quiet line to the event log ([#28]). The requested weekly/monthly
+  interval would have meant verifying the credentials less often, which is the one thing
+  the check exists to do — this removes the noise instead. The schedule, the failure
+  events, the system journal, the dashboard verdict and `/api/status` are all unaffected,
+  and two green lines are never suppressed: an explicitly requested run, and a recovery
+  from a failure that was reported.
+
+### Fixed
+- **A disabled webhook without a URL no longer blocks the whole save** ([#35]). Such a card
+  used to be discarded on save, so the interface had to refuse the save to stop it
+  vanishing in silence — which left inventing a fake URL for a target that was switched off
+  as the only way forward. A card is now kept on its name alone, and the warning is raised
+  only for a webhook that is active and has nowhere to post.
+- **The sign-in page works with password managers** ([#26]). It was a lone password input
+  with no form and no username field, so Bitwarden's inline dropdown stayed empty while its
+  manual "fill" worked — the symptom reported. It is now a real form with a fixed,
+  off-screen username field and the proper `autocomplete` hints. The five secret fields in
+  Settings (API token, both SNMPv3 passphrases, the NUT password, the webhook header value)
+  are marked so a manager does not paste the UI password over an API token — a substitution
+  that would only surface during an outage.
+
+### Changed
+- The dry-run notice in the event log no longer shares its throttle with the self-test's
+  "ok" lines.
+
+[#26]: https://github.com/ffind-dev/pve-ups/issues/26
+[#28]: https://github.com/ffind-dev/pve-ups/issues/28
+[#34]: https://github.com/ffind-dev/pve-ups/issues/34
+[#35]: https://github.com/ffind-dev/pve-ups/issues/35
+
 ## [4.1.0] - 2026-08-31
 
 A reliability release. Everything here came out of one review of the shutdown path, and
@@ -1141,7 +1202,8 @@ keep working).
   needs; a legacy `notifications.smtp` config key is ignored on load and dropped on the
   next save.
 
-[Unreleased]: https://github.com/ffind-dev/pve-ups/compare/v4.1.0...HEAD
+[Unreleased]: https://github.com/ffind-dev/pve-ups/compare/v4.2.0...HEAD
+[4.2.0]: https://github.com/ffind-dev/pve-ups/compare/v4.1.0...v4.2.0
 [4.1.0]: https://github.com/ffind-dev/pve-ups/compare/v4.0.0...v4.1.0
 [4.0.0]: https://github.com/ffind-dev/pve-ups/compare/v3.5.0...v4.0.0
 [3.5.0]: https://github.com/ffind-dev/pve-ups/compare/v3.4.0...v3.5.0

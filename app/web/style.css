@@ -477,6 +477,20 @@ svg.topo .topo-node.hl rect { stroke-width: 2.5; stroke: var(--text); }
 svg.topo .topo-node.hl.is-crit rect { stroke: var(--crit); }
 svg.topo .topo-node.hl.is-warn rect { stroke: var(--warn); }
 
+/* ---------- Utilities -------------------------------------------------------- */
+/* Off-screen but still a real, laid-out form control. Deliberately NOT display:none or
+   visibility:hidden: password managers skip those, and the login form's username field
+   exists precisely so a manager can see it (see index.html).
+
+   The one place it is used sits inside .card.center, whose own "input" rule is the more
+   specific of the two — hence the extra selector rather than a bare class, so the box
+   really is 1px wherever it is applied instead of only looking hidden by its clip. */
+.visually-hidden,
+.card.center input.visually-hidden {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+
 /* ---------- Footer ----------------------------------------------------------- */
 footer { max-width: var(--maxw); margin: 20px auto 28px; padding: 0 18px; color: var(--text-faint); font-size: 12px; text-align: center; }
 

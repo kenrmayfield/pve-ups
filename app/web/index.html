@@ -63,13 +63,24 @@
          with (i.e. the service restarted into an update while the tab stayed open). -->
     <div id="reloadNote" class="banner info" hidden></div>
 
-    <!-- LOGIN -->
+    <!-- LOGIN
+         A real <form> with a username field, even though the appliance has no user
+         accounts: password managers key their autofill on the username/password PAIR, and
+         a lone password input left Bitwarden's inline dropdown empty while its manual
+         "fill" still worked. The username is fixed, off-screen (.visually-hidden, NOT
+         display:none — managers skip hidden fields) and never sent anywhere; it exists so
+         the browser and the manager can recognise this as a login form. -->
     <section id="login" class="card center" hidden>
       <span class="brand"><svg class="mark icon-lg"><use href="#i-shield"></use></svg> PVE-UPS</span>
       <h2 data-i18n="login.title">Sign in</h2>
       <p class="muted" data-i18n="login.hint">Enter the UI password.</p>
-      <input type="password" id="loginPw" placeholder="Password" data-i18n-placeholder="login.pwPlaceholder" />
-      <button id="loginBtn" class="btn-primary" data-i18n="login.submit">Sign in</button>
+      <form id="loginForm">
+        <input type="text" id="loginUser" name="username" class="visually-hidden"
+               value="pve-ups" autocomplete="username" tabindex="-1" aria-hidden="true" />
+        <input type="password" id="loginPw" name="password" autocomplete="current-password"
+               placeholder="Password" data-i18n-placeholder="login.pwPlaceholder" />
+        <button type="submit" id="loginBtn" class="btn-primary" data-i18n="login.submit">Sign in</button>
+      </form>
       <p class="error" id="loginErr"></p>
     </section>
 
@@ -78,8 +89,13 @@
       <span class="brand"><svg class="mark icon-lg"><use href="#i-shield"></use></svg> PVE-UPS</span>
       <h2 data-i18n="firstrun.title">Initial setup</h2>
       <p class="muted" data-i18n="firstrun.hint">Set a password for the web interface.</p>
-      <input type="password" id="newPw" placeholder="New password (min. 6 characters)" data-i18n-placeholder="firstrun.pwPlaceholder" />
-      <button id="setPwBtn" class="btn-primary" data-i18n="firstrun.submit">Set password &amp; start</button>
+      <form id="firstrunForm">
+        <input type="text" id="firstUser" name="username" class="visually-hidden"
+               value="pve-ups" autocomplete="username" tabindex="-1" aria-hidden="true" />
+        <input type="password" id="newPw" name="new-password" autocomplete="new-password"
+               placeholder="New password (min. 6 characters)" data-i18n-placeholder="firstrun.pwPlaceholder" />
+        <button type="submit" id="setPwBtn" class="btn-primary" data-i18n="firstrun.submit">Set password &amp; start</button>
+      </form>
       <p class="error" id="firstErr"></p>
     </section>
 
@@ -326,6 +342,10 @@
               <option value="1440" data-i18n="sys.iv1440">daily (24 h)</option>
             </select></label>
         </div>
+        <label class="switch"
+          title="Off: the event log only mentions the self-test when it fails. The check itself keeps running at the interval above." data-i18n-title="sys.selftestLogOkTitle">
+          <input type="checkbox" id="selftest_log_ok" />
+          <span data-i18n="sys.selftestLogOk">Log successful self-tests to the event log</span></label>
       </div>
 
       <div class="card">
@@ -368,8 +388,8 @@
       <div class="card">
         <div class="card-h"><h3 data-i18n="pw.title">Change password</h3></div>
         <div class="row" style="align-items:flex-end">
-          <label title="Enter the currently valid web interface password to confirm." data-i18n-title="pw.currentTitle"><span data-i18n="pw.current">Current password</span> <input id="cur_pw" type="password" /></label>
-          <label title="New web interface password (at least 6 characters)." data-i18n-title="pw.newTitle"><span data-i18n="pw.new">New password</span> <input id="chg_pw" type="password" /></label>
+          <label title="Enter the currently valid web interface password to confirm." data-i18n-title="pw.currentTitle"><span data-i18n="pw.current">Current password</span> <input id="cur_pw" type="password" autocomplete="current-password" /></label>
+          <label title="New web interface password (at least 6 characters)." data-i18n-title="pw.newTitle"><span data-i18n="pw.new">New password</span> <input id="chg_pw" type="password" autocomplete="new-password" /></label>
           <button id="changePwBtn" class="btn-ghost" style="flex:0 0 auto" data-i18n="pw.change">Change</button>
         </div>
         <span class="muted" id="pwMsg"></span>

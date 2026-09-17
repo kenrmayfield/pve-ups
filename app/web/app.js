@@ -89,21 +89,25 @@ function applyDeploymentMode() {
 }
 
 // --- auth -------------------------------------------------------------------
-$("setPwBtn").onclick = async () => {
+// Both of these are <form onsubmit> rather than <button onclick>, and that is what makes
+// password managers offer to fill and to save (see index.html). It also covers the Enter
+// key for free, which used to need a keydown listener of its own.
+$("firstrunForm").onsubmit = async (e) => {
+  e.preventDefault();
   try {
     await api("/api/password", "POST", { new_password: $("newPw").value });
     location.reload();
-  } catch (e) { $("firstErr").textContent = e.message; }
+  } catch (err) { $("firstErr").textContent = err.message; }
 };
 
-$("loginBtn").onclick = async () => {
+$("loginForm").onsubmit = async (e) => {
+  e.preventDefault();
   try {
     await api("/api/login", "POST", { password: $("loginPw").value });
     $("logoutBtn").hidden = false;
     enterApp();
-  } catch (e) { $("loginErr").textContent = e.message; }
+  } catch (err) { $("loginErr").textContent = err.message; }
 };
-$("loginPw").addEventListener("keydown", (e) => { if (e.key === "Enter") $("loginBtn").click(); });
 
 $("logoutBtn").onclick = async () => { await api("/api/logout", "POST"); location.reload(); };
 
@@ -645,11 +649,11 @@ function addUpsCard(u, open) {
         <div class="row">
           <label title="${esc(t("cfg.v3userTitle"))}">${esc(t("cfg.v3user"))} <input class="u_v3_user" value="${esc(u.v3_user || "")}" /></label>
           <label title="${esc(t("cfg.v3authTitle"))}">${esc(t("cfg.v3auth"))} <select class="u_v3_auth_proto">${opts(AUTH_PROTOS, u.v3_auth_proto || "sha")}</select></label>
-          <label title="${esc(t("cfg.v3authpwTitle"))}">${esc(t("cfg.v3authpw"))} <input class="u_v3_auth_pass" type="password" placeholder="${esc(authPh)}" /></label>
+          <label title="${esc(t("cfg.v3authpwTitle"))}">${esc(t("cfg.v3authpw"))} <input class="u_v3_auth_pass" type="password" autocomplete="new-password" placeholder="${esc(authPh)}" /></label>
         </div>
         <div class="row">
           <label title="${esc(t("cfg.v3privTitle"))}">${esc(t("cfg.v3priv"))} <select class="u_v3_priv_proto">${opts(PRIV_PROTOS, u.v3_priv_proto || "aes")}</select></label>
-          <label title="${esc(t("cfg.v3privpwTitle"))}">${esc(t("cfg.v3privpw"))} <input class="u_v3_priv_pass" type="password" placeholder="${esc(privPh)}" /></label>
+          <label title="${esc(t("cfg.v3privpwTitle"))}">${esc(t("cfg.v3privpw"))} <input class="u_v3_priv_pass" type="password" autocomplete="new-password" placeholder="${esc(privPh)}" /></label>
         </div>
       </div>
     </div>
@@ -657,7 +661,7 @@ function addUpsCard(u, open) {
       <div class="row">
         <label title="${esc(t("cfg.nutNameTitle"))}">${esc(t("cfg.nutName"))} <input class="u_ups_name" value="${esc(u.ups_name || "")}" placeholder="ups" /></label>
         <label title="${esc(t("cfg.nutUserTitle"))}">${esc(t("cfg.nutUser"))} <input class="u_nut_user" value="${esc(u.username || "")}" /></label>
-        <label title="${esc(t("cfg.nutPwTitle"))}">${esc(t("cfg.nutPw"))} <input class="u_nut_pass" type="password" placeholder="${esc(nutPh)}" /></label>
+        <label title="${esc(t("cfg.nutPwTitle"))}">${esc(t("cfg.nutPw"))} <input class="u_nut_pass" type="password" autocomplete="new-password" placeholder="${esc(nutPh)}" /></label>
       </div>
       <p class="muted" style="margin:.15rem 0 0">${esc(t("cfg.nutHint"))}</p>
     </div>
@@ -988,6 +992,10 @@ async function loadConfig() {
   setChk("selftest_enabled", c.selftest_enabled);
   setVal("selftest_hour", c.selftest_hour);
   setVal("selftest_interval_min", c.selftest_interval_min);
+  // A config written before this field existed has no value for it; the backend default is
+  // "on", so treat an absent one as on rather than letting the checkbox render unticked and
+  // then save that back as an opt-out the user never made.
+  setChk("selftest_log_ok", c.selftest_log_ok !== false);
 
   renderWebhooks(c.notifications.webhooks || []);
 
@@ -1015,6 +1023,13 @@ function addHostRow(h, isNew, open) {
   // engine latches a shutdown against. A new card gets one here so it survives the first
   // save; an existing one keeps whatever the backend assigned.
   const hostId = h.id || nextHostId();
+  // Note on the type="password" field below (and on its four siblings — the two SNMPv3
+  // passphrases, the NUT password and the webhook auth value): every one of them carries
+  // autocomplete="new-password". Giving the login form a username field so Bitwarden can
+  // recognise it (see index.html) also makes every other password box on the site a
+  // candidate, and the UI password silently pasted over an API token would be discovered
+  // during an outage. "new-password" is the value managers actually honour here; "off" is
+  // widely ignored.
   el.innerHTML = `
     <summary class="cfg-head">${svgIcon("i-server")}<span class="cfg-title h_sum_name"></span><span class="cfg-sub h_sum_meta"></span></summary>
     <input type="hidden" class="h_id" value="${esc(hostId)}" />
@@ -1025,7 +1040,7 @@ function addHostRow(h, isNew, open) {
     </div>
     <div class="row">
       <label title="${esc(t("host.tokenIdTitle"))}">${esc(t("host.tokenId"))} <input class="h_token_id" value="${esc(h.token_id || "")}" /></label>
-      <label title="${esc(t("host.tokenSecretTitle"))}">${esc(t("host.tokenSecret"))} <input class="h_token_secret" type="password" placeholder="${esc(secretSet ? t("cfg.unchanged") : t("host.tokenSecretPh"))}" /></label>
+      <label title="${esc(t("host.tokenSecretTitle"))}">${esc(t("host.tokenSecret"))} <input class="h_token_secret" type="password" autocomplete="new-password" placeholder="${esc(secretSet ? t("cfg.unchanged") : t("host.tokenSecretPh"))}" /></label>
     </div>
     <p class="warnnote h_dupurl" hidden>${esc(t("host.dupUrl"))}</p>
     <p class="help h_hint"><span class="h_hinttext"></span> <a class="h_hintdoc" data-manual="token-pve" target="_blank" rel="noopener"></a></p>
@@ -1545,6 +1560,12 @@ function addWebhookCard(w, open) {
   div.className = "ups-cfg";
   if (open !== false) div.open = true;
   const authPh = w.auth_header_value === SECRET_PLACEHOLDER ? t("cfg.unchanged") : "";
+  // Stored as a mapping, edited as "Name: Value" lines. The textarea sends its raw text
+  // back and config.parse_extra_headers() does the parsing, so there is exactly one place
+  // that decides what a valid header is — and the server stays robust against a stale
+  // cached app.js, like every other field here.
+  const extraLines = Object.entries(w.extra_headers || {})
+    .map(([k, v]) => `${k}: ${v}`).join("\n");
   // A webhook that stopped working used to do so in complete silence — the shutdown
   // credentials next door have had a self-test, a chip and an event for releases, while
   // a failed notification reached journald and nowhere else.
@@ -1577,8 +1598,11 @@ function addWebhookCard(w, open) {
       <summary>${esc(t("notif.authSummary"))} <span class="muted">${esc(t("notif.authOptional"))}</span></summary>
       <div class="row">
         <label title="${esc(t("notif.authNameTitle"))}">${esc(t("notif.authName"))} <input class="w_auth_name" value="${esc(w.auth_header_name || "")}" placeholder="Authorization" /></label>
-        <label title="${esc(t("notif.authValueTitle"))}">${esc(t("notif.authValue"))} <input class="w_auth_value" type="password" placeholder="${esc(authPh)}" /></label>
+        <label title="${esc(t("notif.authValueTitle"))}">${esc(t("notif.authValue"))} <input class="w_auth_value" type="password" autocomplete="new-password" placeholder="${esc(authPh)}" /></label>
       </div>
+      <label title="${esc(t("notif.extraHeadersTitle"))}">${esc(t("notif.extraHeaders"))}
+        <textarea class="w_extra_headers" rows="3" placeholder="OCS-APIRequest: true" style="font-family:monospace;font-size:.85em">${esc(extraLines)}</textarea></label>
+      <p class="help">${esc(t("notif.extraHeadersHelp"))}</p>
     </details>
     <div class="row" style="margin:0;align-items:center">
       <button class="btn-ghost btn-sm w_test" style="flex:0 0 auto" title="${esc(t("notif.testTitle"))}">${esc(t("notif.test"))}</button>
@@ -1624,12 +1648,21 @@ function webhookFromCard(div) {
     auth_header_name: q(".w_auth_name").value.trim(),
     // Empty means "unchanged" — same convention as every other secret in this UI.
     auth_header_value: av === "" ? SECRET_PLACEHOLDER : av,
+    // Raw text on purpose (see addWebhookCard): the server parses it.
+    extra_headers: q(".w_extra_headers").value,
   };
 }
 
+// A card survives on a URL *or* a name. Requiring the URL made a disabled, half-prepared
+// entry impossible to save at all (#35): the card was dropped here, so incompleteCards()
+// had to refuse the save to stop it vanishing in silence, and the way out was to invent a
+// URL for a webhook that was switched off anyway. A name is enough to mean "keep this" —
+// notify() sends nothing without a URL (see notify.py: `h.enabled and h.url`), so an
+// unfinished draft costs nothing. With neither, the card carries no information at all and
+// is still discarded.
 function currentWebhookList() {
   return Array.from(document.querySelectorAll("#webhookList .ups-cfg"))
-    .map(webhookFromCard).filter((w) => w.url);
+    .map(webhookFromCard).filter((w) => w.url || w.name);
 }
 
 async function testWebhook(div) {
@@ -1662,6 +1695,7 @@ function buildConfig() {
     // Must be sent: the server rebuilds the config from this payload alone, so a missing
     // field would silently fall back to its default on every save.
     selftest_interval_min: getNum("selftest_interval_min") ?? 1440,
+    selftest_log_ok: getChk("selftest_log_ok"),
     ups: currentUpsList(),
     hosts,
     thresholds: {
@@ -1766,11 +1800,14 @@ function incompleteCards() {
       bad.push([el, t("save.needUpsName", { who })]);
     }
   });
-  // Every card, enabled or not — unlike the host block above, and deliberately so:
-  // currentWebhookList() discards a URL-less hook whatever its "enabled" state, so this is
-  // the "would be silently dropped" kind, which no checkbox licenses.
+  // Enabled cards only, like the second kind in the host block above. A webhook that is
+  // switched on but has nowhere to post is the familiar shape: it looks configured, sends
+  // nothing, and says so only once an event should have gone out. A DISABLED one is a
+  // draft — a card named while the chat system's URL is still being fetched — and
+  // currentWebhookList() now keeps it (it survives on its name alone), so there is nothing
+  // to lose and no reason to stand between the operator and the save button.
   document.querySelectorAll("#webhookList .ups-cfg").forEach((el, i) => {
-    if (!el.querySelector(".w_url").value.trim()) {
+    if (el.querySelector(".w_enabled").checked && !el.querySelector(".w_url").value.trim()) {
       const name = el.querySelector(".w_name").value.trim();
       bad.push([el, t("save.needWebhookUrl",
                       { who: name || t("save.cardNo", { n: i + 1 }) })]);

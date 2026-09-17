@@ -311,7 +311,8 @@ unterscheiden sich von Proxmox VE und erklären die Befehle oben:
 - **Webhook-Benachrichtigungen** bei wichtigen Ereignissen — beliebig viele Ziele, jedes
   mit eigenem Format (vollständiges Status-JSON, **Microsoft Teams**, **Slack**,
   **Discord**, **ntfy**, Klartext oder eine **eigene Vorlage** mit Platzhalter-Ersetzung),
-  Stufenfilter, optionalem Authentifizierungs-Header und Testversand. Der Versand läuft
+  Stufenfilter, optionalem Authentifizierungs-Header samt beliebigen weiteren Headern, die
+  das Ziel braucht (etwa für Nextcloud Talk), und Testversand. Der Versand läuft
   parallel und unter einer gemeinsamen Obergrenze; ein nicht erreichbares Ziel kostet den
   anderen also weder ihre Meldung noch dem Shutdown Akkulaufzeit. Ein Ziel, das nicht mehr
   funktioniert, wird wie ein kaputtes Shutdown-Credential gemeldet: als Ereignis, als

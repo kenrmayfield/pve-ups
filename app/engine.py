@@ -2035,10 +2035,28 @@ class Engine:
         # host per day and drown the 48 h event feed. Write one per day, plus whenever the
         # test recovers from a failure. Computed once, before the flags below are updated,
         # and shared with the cluster check so both follow the same cadence.
-        log_ok = (
+        log_daily = (
             force_log
             or self.last_selftest_ok is False
             or self.last_selftest_ok_logged != today
+        )
+        # ...and the opt-out on top of it, for an estate whose operator is the only one who
+        # ever touches the tokens and reads the daily green line as noise. Deliberately only
+        # the routine "ok" lines: the check itself keeps running at its configured interval,
+        # so a credential that breaks is still caught within the hour rather than at the
+        # outage. Two green lines are never routine and survive the switch:
+        #   force_log — an explicitly requested run. Pressing "Test now" and being told
+        #               nothing is indistinguishable from a broken button.
+        #   a recovery (last_selftest_ok is False) — it closes out a failure that WAS
+        #               reported, so suppressing it would leave the log claiming the
+        #               credential is still broken.
+        # log_daily, NOT this, is what the dry-run notice below hangs on — that one is a
+        # standing misconfiguration, not a report of success, and silencing the good news
+        # must not silence it too.
+        log_ok = (
+            force_log
+            or self.last_selftest_ok is False
+            or (log_daily and self.cfg.selftest_log_ok)
         )
         ok_all = True
         for host, result in zip(hosts, results):
@@ -2074,8 +2092,10 @@ class Engine:
         # token valid and every privilege in place while the master switch means none of it
         # is ever used — and dry_run defaults to on, so this is the state a half-finished
         # commissioning leaves behind. Quiet and on the same daily cadence as the "ok"
-        # lines (log_ok), because it is a standing condition, not an incident.
-        if self.cfg.dry_run and self.cfg.configured and log_ok:
+        # lines (log_daily), because it is a standing condition, not an incident — but on
+        # log_daily rather than log_ok, so switching the green lines off does not also
+        # switch off the one line that says the appliance will not actually do anything.
+        if self.cfg.dry_run and self.cfg.configured and log_daily:
             self._log_quiet(
                 "Dry-run is on — nothing will be shut down",
                 "The credential check above says the shutdown targets are ready, but the "

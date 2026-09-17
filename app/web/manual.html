@@ -167,7 +167,7 @@
   <header class="topbar">
     <span class="brand">
       <svg class="mark icon-lg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 4 5v6c0 5 3.4 8.5 8 11 4.6-2.5 8-6 8-11V5l-8-3z"/></svg>
-      PVE-UPS <span class="sub">User Manual · v4.1.0</span>
+      PVE-UPS <span class="sub">User Manual · v4.2.0</span>
     </span>
     <span class="spacer"></span>
     <a class="btn" href="https://github.com/ffind-dev/pve-ups" target="_blank"
@@ -1152,6 +1152,17 @@ curl -s http://&lt;container-ip&gt;:8080/api/status \
         additional header, for example <code>Authorization: Bearer …</code> for a protected
         ntfy topic or an API-key header. The value is treated as a secret: it is never
         returned by the API and stays unchanged when you save without re-entering it.</p>
+        <p><b>Extra headers</b> (optional, per webhook) — one header per line, written as
+        <code>Name: Value</code>, for targets that need more than the single header above.
+        Nextcloud Talk is the typical case: besides its Basic authorisation it expects
+        <code>OCS-APIRequest: true</code> and <code>Accept: application/json</code>. These
+        headers override whatever the chosen format sets, but never the authentication
+        header above. Lines that are not a valid header are ignored.</p>
+        <div class="callout warn">
+          <span><b>No secrets here.</b> Unlike the authentication header above, these values
+          are stored and displayed in plain text and are returned by the configuration API.
+          Anything confidential belongs in the <b>Value</b> field above.</span>
+        </div>
         <p><b>Send from level</b> — which events are sent at all. Everything below the
         selected level is still written to the event log, it just does not trigger a
         message:</p>
@@ -1207,6 +1218,24 @@ curl -s http://&lt;container-ip&gt;:8080/api/status \
         short interval does not bury the event log. While a UPS is on battery the self-test
         is skipped entirely — during an outage the countdown has priority. A restart does
         not repeat a self-test that already ran in the current slot.</p>
+        <p>If even that one line a day is too much — a single administrator who knows when a
+        token changed — untick <b>“Log successful self-tests to the event log”</b>. Only the
+        routine green line disappears; the check keeps running at the configured interval,
+        failures are logged and notified as before, the system journal still records every
+        run, and the dashboard's per-host verdict is unaffected. The cluster check shares the
+        self-test's schedule and its log line, so the per-cluster
+        <code>Cluster &lt;name&gt;: ok</code> goes quiet with it; every cluster
+        <em>warning</em> is reported as before. Two green lines survive the switch as well: a
+        run you request yourself, and the one that reports a recovery from a failure.</p>
+        <div class="callout info">
+          <span>There is deliberately no weekly or monthly interval. The self-test exists to
+          catch a credential that broke since the last outage — a changed token, a new
+          firewall rule, a replaced UPS network card — and none of that keeps to a schedule.
+          If the event log is the problem, silence the line rather than the check; if you
+          want the state actively monitored, poll <code>/api/health</code> from your
+          monitoring system (see <a href="#monitoring">Monitoring</a>), which also covers the
+          case of the appliance not running at all.</span>
+        </div>
         <p><b>Saving settings does not trigger a self-test</b> — that is deliberate, so
         editing the configuration never hammers the Proxmox API. After changing a token or
         ticking the cluster option, use <b>“Run self-test now”</b> on the dashboard to see
@@ -1349,6 +1378,22 @@ systemctl start pve-usv-agent.service</code></pre>
         <p class="muted">Simplified, user-visible highlights. The full technical changelog
         lives in the <a href="https://github.com/ffind-dev/pve-ups/blob/main/CHANGELOG.md"
         target="_blank" rel="noopener">GitHub repository</a>.</p>
+
+        <div class="cl-ver">4.2.0 <span class="date">2026</span></div>
+        <ul>
+          <li><b>A webhook you have switched off no longer has to have a URL.</b> A
+          half-prepared notification target is kept as a draft; only an <em>active</em> one
+          still insists on somewhere to post.</li>
+          <li><b>Webhooks can carry extra headers.</b> Targets that need more than one — like
+          Nextcloud Talk, which expects <code>OCS-APIRequest</code> and <code>Accept</code>
+          alongside its authorisation — now work without a proxy in front.</li>
+          <li><b>Password managers can fill the login form again.</b> The sign-in page is a
+          real form with a username field, which is what inline autofill keys on; the token
+          and password fields in the settings are marked so a manager leaves them alone.</li>
+          <li><b>Successful self-tests can be kept out of the event log</b> without testing
+          the credentials any less often. Failures, recoveries and “Run self-test now”
+          always report.</li>
+        </ul>
 
         <div class="cl-ver">4.1.0 <span class="date">2026</span></div>
         <ul>
